@@ -1,0 +1,3 @@
+option('lua', type : 'combo', choices : ['false', 'luajit', 'lua5.1', 'lua5.4'], value : 'lua5.4')
+option('lua-module-directory', type : 'string', value : '', description : 'override lua C module directory')
+
