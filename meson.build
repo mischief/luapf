@@ -30,18 +30,13 @@ lua_pf_srcs = '''
 pf.c state.c queue.c table.c
 '''.split()
 
-snippets = import('snippets')
-vis_header = snippets.symbol_visibility_header('luapf_vis.h')
-
 lua_pf = shared_library('pf',
-  lua_pf_srcs + vis_header,
+  lua_pf_srcs,
   name_prefix: '',
   dependencies: [lua_dep],
   install: true,
   install_dir: install_cmod,
   gnu_symbol_visibility: 'hidden',
-  c_args: ['-DLUAPF_COMPILATION'],
-
 )
 
 doas_bin = find_program('doas')

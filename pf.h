@@ -1,8 +1,6 @@
 #ifndef luapfh
 #define luapfh
 
-#include "luapf_vis.h"
-
 #define PF_MT "PFMT"
 #define PFSTATES_MT "PFSTATESMT"
 #define PFSTATE_MT "PFSTATEMT"

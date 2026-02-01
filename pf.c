@@ -224,7 +224,7 @@ static const luaL_Reg pflib[] = {
 	{ 0, 0 }
 };
 
-LUAPF_API int
+__attribute__((visibility("default"))) int
 luaopen_pf(lua_State* L)
 {
 	luaL_newlib(L, pflib);
