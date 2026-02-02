@@ -39,15 +39,6 @@ lua_pf = shared_library('pf',
   gnu_symbol_visibility: 'hidden',
 )
 
-doas_bin = find_program('doas')
-lua_bin = find_program(dep_name)
-test('pf_test',
-  doas_bin,
-  depends: lua_pf,
-  args: [lua_bin, files('pf_test.lua')],
-  workdir: meson.current_build_dir()
-)
-
 ldoc_bin = find_program('ldoc', required: false)
 if ldoc_bin.found()
   documentation = custom_target('ldoc',
@@ -56,4 +47,20 @@ if ldoc_bin.found()
     command: [ldoc_bin, '-d', '@OUTDIR@', '@INPUT@'],
   )
 endif
+
+doas_bin = find_program('doas')
+lua_bin = find_program(dep_name)
+
+pf_tests = '''
+pf_test_tables.lua
+'''.split()
+
+foreach t : pf_tests
+  test(t,
+    doas_bin,
+    depends: lua_pf,
+    args: [lua_bin, files(t)],
+    workdir: meson.current_build_dir()
+  )
+endforeach
 

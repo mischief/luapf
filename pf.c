@@ -187,7 +187,13 @@ static const luaL_Reg pfmeta[] = {
 	{"status", pfstatus},
 	{"states", pfstates},
 	{"queues", pfqueues},
+
 	{"tables", pftables},
+	{"gettable", pfgettable},
+	{"addtables", pfaddtables},
+	{"cleartables", pfcleartables},
+	{"deletetables", pfdeletetables},
+
 	{"__gc", pfgc},
 	{0, 0},
 };
