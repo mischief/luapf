@@ -259,7 +259,7 @@ pftabledelete(lua_State *L)
 	return 1;
 }
 
-struct ro_property_head table_properties;
+static struct ro_property_head table_properties;
 
 ro_property_generate(table, anchor) {
 	struct luapftable *lpft = luaL_checkudata(L, idx, PFTABLE_MT);
