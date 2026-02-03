@@ -23,7 +23,6 @@ STAILQ_HEAD(ro_property_head, ro_property);
 #define ro_property_lookup(state, props, mtidx, keyidx) \
 	const char *key = luaL_checkstring(state, keyidx); \
 	struct ro_property *prop; \
-	key = luaL_checkstring(state, 2); \
 	STAILQ_FOREACH(prop, props, link) { \
 		if(!strcmp(prop->name, key)) \
 			break; \
@@ -38,23 +37,23 @@ STAILQ_HEAD(ro_property_head, ro_property);
 #define ro_property_pairs(state, props, mtidx, keyidx) \
 	const char *key; \
 	struct ro_property *prop; \
-	if(lua_isnil(L, 2)){ \
-		prop = STAILQ_FIRST(&table_properties); \
+	if(lua_isnil(L, keyidx)){ \
+		prop = STAILQ_FIRST(props); \
 	} else { \
-		key = luaL_checkstring(L, 2); \
-		STAILQ_FOREACH(prop, &table_properties, link) { \
+		key = luaL_checkstring(L, keyidx); \
+		STAILQ_FOREACH(prop, props, link) { \
 			if(!strcmp(prop->name, key)){ \
 				prop = STAILQ_NEXT(prop, link); \
 				break; \
 			} \
 		} \
 	} \
-	if(prop == STAILQ_END(&table_properties)){ \
+	if(prop == STAILQ_END(props)){ \
 		lua_pushnil(L); \
 		return 1; \
 	} \
 	lua_pushstring(L, prop->name); \
-	prop->get(L, 1); \
+	prop->get(L, mtidx); \
 	return 2 \
 
 #endif
