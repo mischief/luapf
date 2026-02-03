@@ -64,3 +64,7 @@ foreach t : pf_tests
   )
 endforeach
 
+devenv = environment()
+devenv.append('LUA_CPATH', meson.current_build_dir() / '?.so', separator: ';')
+meson.add_devenv(devenv)
+
