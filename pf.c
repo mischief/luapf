@@ -170,6 +170,26 @@ pfstates(lua_State *L)
 	return 1;
 }
 
+/* TODO: accept a table with more filter args */
+static int
+pfkillstates(lua_State *L)
+{
+	struct luapf *pf = luaL_checkudata(L, 1, PF_MT);
+	lua_Integer id = luaL_checkinteger(L, 2);
+	struct pfioc_state_kill psk;
+
+	memset(&psk, 0, sizeof(psk));
+
+	psk.psk_pfcmp.id = htobe64(id);
+
+	if(ioctl(pf->fd, DIOCKILLSTATES, &psk) < 0)
+		luaL_error(L, "DIOCGETSTATES: %s", strerror(errno));
+
+	lua_pushinteger(L, psk.psk_killed);
+
+	return 1;
+}
+
 static int
 pfgc(lua_State *L)
 {
@@ -185,7 +205,10 @@ static const luaL_Reg pfmeta[] = {
 	{"start", pfstart},
 	{"stop", pfstop},
 	{"status", pfstatus},
+
 	{"states", pfstates},
+	{"killstates", pfkillstates},
+
 	{"queues", pfqueues},
 
 	{"tables", pftables},
