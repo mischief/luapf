@@ -78,7 +78,7 @@ lua_pf = shared_library('pf',
 ldoc_bin = find_program('ldoc', required: false)
 if ldoc_bin.found()
   documentation = custom_target('ldoc',
-    input: [files('pf.c')],
+    input: files(lua_pf_srcs),
     output: ['index.html', 'ldoc.css'],
     command: [ldoc_bin, '-d', '@OUTDIR@', '@INPUT@'],
   )

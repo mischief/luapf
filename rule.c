@@ -20,6 +20,10 @@
 #include "property.h"
 #include "banned.h"
 
+/***
+@module pf
+*/
+
 struct luapfrule {
 	struct pf_rule rule;
 	char anchor[PATH_MAX];
@@ -536,7 +540,15 @@ pfrulepairs(lua_State *L)
 	return 3;
 }
 
-/* Rules read as "block in on em0 from <bad> to any", like pfctl prints. */
+/***
+Render a rule the way pfctl prints it.
+
+Rule flags and state options are left out, so the text is close to a
+pfctl -s rules line but not identical to it.
+@function rule:__tostring
+@treturn string
+@usage print(tostring(r)) -- block drop in log quick from &lt;bad&gt; to any
+*/
 static int
 pfruletostring(lua_State *L)
 {
@@ -623,10 +635,17 @@ static const luaL_Reg pfrulemeta[] = {
     {NULL,         NULL          },
 };
 
-/*
- * DIOCGETRULES opens a kernel transaction and hands back its ticket; each
- * DIOCGETRULE then yields the next rule and fails with ENOENT at the end.
- */
+/***
+Read the rules of an anchor.
+
+The kernel walks a transaction rather than serving rules by number, so the
+whole ruleset is read at once.
+@function pf:rules
+@string[opt=""] anchor
+@treturn table array of rule objects
+@raise if the anchor does not exist
+@usage for _, r in ipairs(h:rules()) do print(tostring(r)) end
+*/
 int
 pfrules(lua_State *L)
 {
@@ -692,3 +711,14 @@ luapf_rules_register(lua_State *L)
 	luaL_setfuncs(L, pfrulemeta, 0);
 	lua_pop(L, 1);
 }
+
+/***
+A single rule.
+
+Read-only properties: nr, action, direction, af, proto, quick, log,
+keep_state, interface, label, tag, anchor, anchor_call, source,
+destination, evaluations, packets_in, packets_out, bytes_in, bytes_out,
+states_cur and states_total. Source and destination render the way pfctl
+prints them, tables as &lt;name&gt; and interfaces as (name).
+@table rule
+*/

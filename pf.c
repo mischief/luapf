@@ -21,6 +21,22 @@
 
 static const char *pfcounternames[] = PFRES_NAMES;
 
+/***
+Read and control the pf packet filter.
+
+Every call raises a lua error on failure, so wrap them in pcall where an
+error is expected. Opening /dev/pf needs root, but the kernel gates the
+ioctls on the open mode rather than the uid: a read-only descriptor keeps
+working after a privilege drop and is refused every write.
+@module pf
+@usage local pf = require("pf")
+*/
+
+/***
+Start pf.
+@function pf:start
+@raise if the ioctl fails
+*/
 static int
 pfstart(lua_State *L)
 {
@@ -33,6 +49,11 @@ pfstart(lua_State *L)
 	return 0;
 }
 
+/***
+Stop pf.
+@function pf:stop
+@raise if the ioctl fails
+*/
 static int
 pfstop(lua_State *L)
 {
@@ -45,6 +66,16 @@ pfstop(lua_State *L)
 	return 0;
 }
 
+/***
+Read the global status.
+
+The result holds running, since, states, states_halfopen, src_nodes,
+debug, hostid, reass, syncookies_active, syncookies_mode, ifname and
+checksum, plus counters, bcounters and pcounters tables.
+@function pf:status
+@treturn table status
+@raise if the ioctl fails
+*/
 static int
 pfstatus(lua_State *L)
 {
@@ -147,6 +178,16 @@ pfstatus(lua_State *L)
 	return 1;
 }
 
+/***
+Read every state.
+
+The result supports the length operator and indexing from one; each entry
+is a state object.
+@function pf:states
+@treturn userdata states
+@raise if the ioctl fails
+@usage for i = 1, #h:states() do print(h:states()[i].source) end
+*/
 static int
 pfstates(lua_State *L)
 {
@@ -173,6 +214,13 @@ pfstates(lua_State *L)
 	return 1;
 }
 
+/***
+Kill one state by id.
+@function pf:killstates
+@int id state id, as the id property reports it
+@treturn int states killed
+@raise if the ioctl fails
+*/
 /* TODO: accept a table with more filter args */
 static int
 pfkillstates(lua_State *L)
@@ -193,7 +241,12 @@ pfkillstates(lua_State *L)
 	return 1;
 }
 
-/* Zeroes the global counters, or the counters of one interface. */
+/***
+Zero the global counters, or the counters of one interface.
+@function pf:clearstatus
+@string[opt] interface
+@raise if the ioctl fails
+*/
 static int
 pfclearstatus(lua_State *L)
 {
@@ -265,6 +318,13 @@ static const luaL_Reg pfmeta[] = {
     {NULL,   NULL},
 };
 
+/***
+Open /dev/pf.
+@function pf.open
+@treturn userdata handle
+@raise if /dev/pf cannot be opened
+@usage local h = pf.open()
+*/
 static int
 pfopen(lua_State *L)
 {
@@ -282,10 +342,17 @@ pfopen(lua_State *L)
 	return 1;
 }
 
-/*
- * Adopts a descriptor already open on /dev/pf, so a process can open it while
- * privileged and use it after dropping. The handle closes it on collection.
- */
+/***
+Adopt a descriptor already open on /dev/pf.
+
+Lets a process open /dev/pf while privileged and keep reading after it
+drops. The descriptor is checked with DIOCGETSTATUS, and the handle closes
+it on collection.
+@function pf.openfd
+@int fd
+@treturn userdata handle
+@raise if the descriptor is not /dev/pf
+*/
 static int
 pfopenfd(lua_State *L)
 {

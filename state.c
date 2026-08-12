@@ -19,6 +19,10 @@
 #include "property.h"
 #include "banned.h"
 
+/***
+@module pf
+*/
+
 enum { maxprotos = 256, maxprotosize = 16 };
 
 static const char *
@@ -373,7 +377,15 @@ static const luaL_Reg pfstatesmeta[] = {
     {NULL,      NULL         },
 };
 
-/* One state by id, as reported by the id and creatorid properties. */
+/***
+Read one state by id.
+@function pf:getstate
+@int id
+@int[opt=0] creatorid
+@treturn ?userdata state, or nil if no state has that id
+@raise if the ioctl fails
+@usage local s = h:states()[1]; h:getstate(s.id, s.creatorid)
+*/
 int
 pfgetstate(lua_State *L)
 {
@@ -404,7 +416,13 @@ pfgetstate(lua_State *L)
 	return 1;
 }
 
-/* Removes every state, or every state on one interface. */
+/***
+Remove every state, or every state on one interface.
+@function pf:clearstates
+@string[opt] interface
+@treturn int states removed
+@raise if the ioctl fails
+*/
 int
 pfclearstates(lua_State *L)
 {
@@ -437,3 +455,13 @@ luapf_states_register(lua_State *L)
 	luaL_setfuncs(L, pfstatemeta, 0);
 	lua_pop(L, 1);
 }
+
+/***
+A single state.
+
+Read-only properties: id, creatorid, ifname, proto, direction, rule,
+creation, expire, source, destination, gateway, packets_in, packets_out,
+bytes_in and bytes_out. Addresses read as host:port, or [host]:port for
+IPv6. Iterating with pairs walks the same set.
+@table state
+*/

@@ -12,10 +12,16 @@
 #include "pf.h"
 #include "banned.h"
 
-/*
- * OpenBSD privilege dropping calls that POSIX does not define, so luaposix
- * does not carry them. Each returns 0, or nil, message, errno.
- */
+/***
+OpenBSD privilege calls that POSIX does not define, so luaposix omits them.
+
+Every function returns 0 on success, or nil, an error message and errno.
+The pledge "pf" promise allows twelve ioctls meant for rule writers, so a
+pledged process cannot read rules; drop privilege and keep a read-only
+descriptor instead.
+@module pf.privsep
+@usage pf.privsep.pledge("stdio inet", nil)
+*/
 
 static int
 pusherr(lua_State *L, int e)
@@ -34,6 +40,13 @@ pusherr(lua_State *L, int e)
 	return 3;
 }
 
+/***
+Restrict the process to a set of promises.
+@function pledge
+@string[opt] promises nil leaves the current set alone
+@string[opt] execpromises
+@treturn int 0
+*/
 static int
 luapledge(lua_State *L)
 {
@@ -48,6 +61,13 @@ luapledge(lua_State *L)
 	return 1;
 }
 
+/***
+Expose one path to the process and hide the rest of the filesystem.
+@function unveil
+@string[opt] path
+@string[opt] permissions any of r, w, x and c
+@treturn int 0
+*/
 static int
 luaunveil(lua_State *L)
 {
@@ -62,6 +82,12 @@ luaunveil(lua_State *L)
 	return 1;
 }
 
+/***
+Replace the supplementary group list with one group.
+@function setgroups
+@int gid
+@treturn int 0
+*/
 static int
 luasetgroups(lua_State *L)
 {
@@ -75,6 +101,14 @@ luasetgroups(lua_State *L)
 	return 1;
 }
 
+/***
+Set the real, effective and saved group id.
+@function setresgid
+@int rgid
+@int egid
+@int sgid
+@treturn int 0
+*/
 static int
 luasetresgid(lua_State *L)
 {
@@ -90,6 +124,14 @@ luasetresgid(lua_State *L)
 	return 1;
 }
 
+/***
+Set the real, effective and saved user id.
+@function setresuid
+@int ruid
+@int euid
+@int suid
+@treturn int 0
+*/
 static int
 luasetresuid(lua_State *L)
 {
@@ -105,6 +147,11 @@ luasetresuid(lua_State *L)
 	return 1;
 }
 
+/***
+Set the text ps shows after the program name.
+@function setproctitle
+@string title
+*/
 static int
 luasetproctitle(lua_State *L)
 {

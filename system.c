@@ -16,6 +16,10 @@
 #include "pf.h"
 #include "banned.h"
 
+/***
+@module pf
+*/
+
 struct namedindex {
 	const char *name;
 	int index;
@@ -56,6 +60,15 @@ static const struct namedindex timeouts[] = {
     {NULL,              0                      },
 };
 
+/***
+Read the configured limits.
+
+Keys are the names pfctl uses: states, src-nodes, frags, tables,
+table-entries, pktdelay-pkts and anchors.
+@function pf:limits
+@treturn table limit name to value
+@raise if the ioctl fails
+*/
 int
 pflimits(lua_State *L)
 {
@@ -79,6 +92,14 @@ pflimits(lua_State *L)
 	return 1;
 }
 
+/***
+Read the configured timeouts in seconds.
+
+Keys are the names pfctl uses, such as tcp.established and src.track.
+@function pf:timeouts
+@treturn table timeout name to seconds
+@raise if the ioctl fails
+*/
 int
 pftimeouts(lua_State *L)
 {
@@ -134,11 +155,17 @@ pushifcounters(lua_State *L, const struct pfi_kif *k)
 	}
 }
 
-/*
- * Per-interface counters, the same numbers as pfctl -vvsI. The kernel fills
- * whatever the caller offers and reports how much it used, so grow the buffer
- * until it comes back short.
- */
+/***
+Read the per-interface counters, the same numbers as pfctl -vvsI.
+
+Each entry holds name, skip, states, rules, routes, srcnodes, cleared and
+eight counter pairs named like in4_pass_packets and out6_block_bytes. The
+filter matches an interface or a group, not a prefix.
+@function pf:interfaces
+@string[opt] filter interface or group name
+@treturn table array of interface tables
+@raise if the ioctl fails
+*/
 int
 pfinterfaces(lua_State *L)
 {
@@ -219,10 +246,16 @@ pushaddress(lua_State *L, sa_family_t af, const struct pf_addr *a)
 	lua_pushstring(L, s);
 }
 
-/*
- * Source nodes track the hosts an overload rule or a sticky pool has seen.
- * The buffer belongs to the userdata, so lua frees it.
- */
+/***
+Read the source tracking nodes.
+
+Nodes exist only for rules that track them, such as an overload rule or a
+sticky pool. Each entry holds address, translation, states, connections,
+packets_in, packets_out, bytes_in, bytes_out, creation, expire and rule.
+@function pf:srcnodes
+@treturn table array of node tables
+@raise if the ioctl fails
+*/
 int
 pfsrcnodes(lua_State *L)
 {
@@ -282,7 +315,14 @@ pfsrcnodes(lua_State *L)
 	return 1;
 }
 
-/* Kills the source nodes of one address, or of a range of two. */
+/***
+Kill the source nodes of one address, or of a range.
+@function pf:killsrcnodes
+@string address
+@string[opt] to end of a range starting at address
+@treturn int nodes killed
+@raise if an address cannot be parsed
+*/
 int
 pfkillsrcnodes(lua_State *L)
 {
@@ -321,6 +361,11 @@ pfkillsrcnodes(lua_State *L)
 	return 1;
 }
 
+/***
+Remove every source tracking node.
+@function pf:clearsrcnodes
+@raise if the ioctl fails
+*/
 int
 pfclearsrcnodes(lua_State *L)
 {

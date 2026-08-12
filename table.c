@@ -16,6 +16,10 @@
 #include "property.h"
 #include "banned.h"
 
+/***
+@module pf
+*/
+
 struct luapftable {
 	int luapfref;
 	struct pfr_tstats stats;
@@ -108,6 +112,12 @@ tablepf(lua_State *L, const struct luapftable *lpft)
 	return luaL_checkudata(L, -1, PF_MT);
 }
 
+/***
+List the addresses of a table.
+@function table:addresses
+@treturn table array of strings, a bare address or address/prefix
+@raise if the ioctl fails
+*/
 static int
 pftableaddresses(lua_State *L)
 {
@@ -159,10 +169,16 @@ addrsum(const uint64_t v[PFR_OP_ADDR_MAX])
 	return sum;
 }
 
-/*
- * Per-address counters. The kernel only keeps these while the table carries
- * the counters flag, which t:setflags{counters = true} turns on.
- */
+/***
+Read the per-address counters of a table.
+
+The kernel only keeps these while the table carries the counters flag,
+which setflags turns on. Each entry holds address, packets_in,
+packets_out, bytes_in, bytes_out and cleared.
+@function table:addrstats
+@treturn table array of counter tables
+@raise if the ioctl fails
+*/
 static int
 pftableaddrstats(lua_State *L)
 {
@@ -239,7 +255,15 @@ flagfield(lua_State *L, int idx, const char *name, int flag, int *set, int *clr)
 	lua_pop(L, 1);
 }
 
-/* Replaces the whole content of a table in one step. */
+/***
+Replace the whole content of a table in one step.
+@function table:replace
+@param addresses a string, or an array of strings
+@treturn int added
+@treturn int deleted
+@treturn int changed
+@raise if an address cannot be parsed
+*/
 static int
 pftablereplace(lua_State *L)
 {
@@ -262,7 +286,12 @@ pftablereplace(lua_State *L)
 	return 3;
 }
 
-/* Zeroes the per-address counters, leaving the addresses in place. */
+/***
+Zero the per-address counters, leaving the addresses in place.
+@function table:clearaddrstats
+@treturn int addresses zeroed
+@raise if the ioctl fails
+*/
 static int
 pftableclearaddrstats(lua_State *L)
 {
@@ -282,10 +311,18 @@ pftableclearaddrstats(lua_State *L)
 	return 1;
 }
 
-/*
- * Sets or clears persist, const and counters; a nil field is left alone.
- * The kernel drops a table that ends up neither persistent nor referenced.
- */
+/***
+Set or clear the persist, const and counters flags.
+
+A nil field is left alone. The kernel drops a table that ends up neither
+persistent nor referenced by a rule, so set persist alongside counters on
+a table lua created itself.
+@function table:setflags
+@tparam table flags any of persist, const and counters
+@treturn int tables changed
+@raise if the ioctl fails
+@usage t:setflags({ counters = true, persist = true })
+*/
 static int
 pftablesetflags(lua_State *L)
 {
@@ -326,6 +363,13 @@ pftablesetflags(lua_State *L)
 	return 1;
 }
 
+/***
+Test whether a table matches an address.
+@function table:test
+@string address
+@treturn bool
+@raise if the address cannot be parsed
+*/
 static int
 pftabletest(lua_State *L)
 {
@@ -372,6 +416,12 @@ pftabletest(lua_State *L)
 	return 1;
 }
 
+/***
+Remove every address from a table.
+@function table:clear
+@treturn int addresses removed
+@raise if the ioctl fails
+*/
 static int
 pftableclear(lua_State *L)
 {
@@ -458,6 +508,14 @@ argstoaddrs(lua_State *L, struct pfioc_table *pt)
 	}
 }
 
+/***
+Add addresses to a table.
+@function table:add
+@param addresses a string, or an array of strings
+@treturn int addresses added
+@raise if an address cannot be parsed
+@usage t:add({ "10.0.0.0/8", "192.168.0.1" })
+*/
 static int
 pftableadd(lua_State *L)
 {
@@ -485,6 +543,13 @@ pftableadd(lua_State *L)
 	return 1;
 }
 
+/***
+Delete addresses from a table.
+@function table:delete
+@param addresses a string, or an array of strings
+@treturn int addresses deleted
+@raise if an address cannot be parsed
+*/
 static int
 pftabledelete(lua_State *L)
 {
@@ -779,6 +844,13 @@ pftablegc(lua_State *L)
 	return 0;
 }
 
+/***
+List the active tables.
+@function pf:tables
+@treturn table array of table objects
+@raise if the ioctl fails
+@usage for _, t in ipairs(h:tables()) do print(t.name, #t) end
+*/
 int
 pftables(lua_State *L)
 {
@@ -888,6 +960,16 @@ findtstats(lua_State *L, int fd, const struct pfr_table *want)
 	return NULL;
 }
 
+/***
+Read one table by name.
+
+The name may carry an anchor path, as in "anchorname/tablename".
+@function pf:gettable
+@string name
+@treturn ?userdata table object, or nil if there is no such table
+@raise if the ioctl fails
+@usage local t = h:gettable("badboys")
+*/
 int
 pfgettable(lua_State *L)
 {
@@ -917,7 +999,16 @@ pfgettable(lua_State *L)
 	return 1;
 }
 
-/* Re-read the counters of an existing table object in place. */
+/***
+Re-read the counters of a table in place.
+
+Table objects are snapshots, so add, delete and replace leave the
+properties stale until this runs.
+@function table:refresh
+@treturn table the same table, so calls chain
+@raise if the table no longer exists
+@usage print(t:refresh().match)
+*/
 static int
 pftablerefresh(lua_State *L)
 {
@@ -996,6 +1087,13 @@ multitableop(lua_State *L, struct pfioc_table *pt, unsigned long op,
 		luaL_error(L, "%s: %s", label, strerror(errno));
 }
 
+/***
+Create tables.
+@function pf:addtables
+@param names a string, or an array of strings
+@treturn int tables created
+@raise if the ioctl fails
+*/
 int
 pfaddtables(lua_State *L)
 {
@@ -1008,6 +1106,13 @@ pfaddtables(lua_State *L)
 	return 1;
 }
 
+/***
+Zero the counters of tables, leaving their addresses in place.
+@function pf:cleartables
+@param names a string, or an array of strings
+@treturn int tables zeroed
+@raise if the ioctl fails
+*/
 int
 pfcleartables(lua_State *L)
 {
@@ -1020,7 +1125,13 @@ pfcleartables(lua_State *L)
 	return 1;
 }
 
-/* Deletes every table in an anchor, defaulting to the main ruleset. */
+/***
+Delete every table in an anchor, defaulting to the main ruleset.
+@function pf:clearalltables
+@string[opt=""] anchor
+@treturn int tables deleted
+@raise if the ioctl fails
+*/
 int
 pfclearalltables(lua_State *L)
 {
@@ -1043,6 +1154,13 @@ pfclearalltables(lua_State *L)
 	return 1;
 }
 
+/***
+Delete tables by name.
+@function pf:deletetables
+@param names a string, or an array of strings
+@treturn int tables deleted
+@raise if the ioctl fails
+*/
 int
 pfdeletetables(lua_State *L)
 {
@@ -1062,3 +1180,14 @@ luapf_tables_register(lua_State *L)
 	luaL_setfuncs(L, pftablemeta, 0);
 	lua_pop(L, 1);
 }
+
+/***
+A single table, as tables and gettable return it.
+
+Read-only properties: name, anchor, persist, const, active, inactive,
+referenced, refdanchor, counters, addresses_count, match, nomatch,
+packets_in, packets_out, bytes_in, bytes_out, cleared, refcnt_rule and
+refcnt_anchor. All of them are a snapshot; refresh re-reads them. The
+length operator returns the address count.
+@table tableobject
+*/

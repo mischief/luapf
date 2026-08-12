@@ -16,6 +16,10 @@
 #include "pf.h"
 #include "banned.h"
 
+/***
+@module pf
+*/
+
 /* An anchor tree deeper or wider than this is a bug, not a configuration. */
 enum { maxanchors = 4096 };
 
@@ -83,10 +87,17 @@ listchildren(lua_State *L, int fd, const char *path, int pidx, int ridx,
 	return (int)count;
 }
 
-/*
- * Walks the anchor tree below an optional root. The kernel reports direct
- * children only, so pending paths live in a lua table, not on the C stack.
- */
+/***
+List every anchor below a root.
+
+The kernel reports direct children only, so this walks the tree. Paths are
+full and sorted, matching pfctl -s Anchors.
+@function pf:anchors
+@string[opt=""] root
+@treturn table array of anchor paths
+@raise if the root anchor does not exist
+@usage for _, a in ipairs(h:anchors()) do print(a, #h:rules(a)) end
+*/
 int
 pfanchors(lua_State *L)
 {

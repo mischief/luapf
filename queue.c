@@ -16,6 +16,10 @@
 #include "pf.h"
 #include "banned.h"
 
+/***
+@module pf
+*/
+
 union queuestats {
 	struct fqcodel_stats fqc;
 	struct hfsc_class_stats hfsc;
@@ -42,6 +46,16 @@ pushcounters(lua_State *L, uint64_t qlength, uint64_t qlimit,
 	lua_setfield(L, -2, "drop_bytes");
 }
 
+/***
+Read every queue and its statistics.
+
+Each entry holds name, parent, ifname, qid, parent_qid, scheduler,
+queue_length, queue_limit, transmit_packets, transmit_bytes,
+drop_packets and drop_bytes, plus flows for a flow queue.
+@function pf:queues
+@treturn table array of queue tables
+@raise if the ioctl fails
+*/
 int
 pfqueues(lua_State *L)
 {
