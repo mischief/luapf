@@ -63,7 +63,7 @@ endif
 lua_dep = dependency(dep_name)
 
 lua_pf_srcs = '''
-pf.c state.c queue.c table.c
+pf.c state.c queue.c table.c rule.c
 '''.split()
 
 lua_pf = shared_library('pf',
@@ -90,6 +90,7 @@ lua_bin = find_program(dep_name)
 pf_tests = '''
 pf_test_tables.lua
 pf_test_states.lua
+pf_test_rules.lua
 '''.split()
 
 foreach t : pf_tests

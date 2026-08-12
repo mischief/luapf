@@ -6,6 +6,7 @@
 #define PFSTATES_MT "PFSTATESMT"
 #define PFSTATE_MT "PFSTATEMT"
 #define PFTABLE_MT "PFTABLEMT"
+#define PFRULE_MT "PFRULEMT"
 
 /* The build hides every symbol; the lua loader needs this one. */
 #define LUAPF_EXPORT __attribute__((visibility("default")))
@@ -18,9 +19,13 @@ LUAPF_EXPORT int luaopen_pf(lua_State *L);
 
 void luapf_states_register(lua_State *L);
 void luapf_tables_register(lua_State *L);
+void luapf_rules_register(lua_State *L);
 
 /* queue.c */
 int pfqueues(lua_State *L);
+
+/* rule.c */
+int pfrules(lua_State *L);
 
 /* table.c */
 int pftables(lua_State *L);
