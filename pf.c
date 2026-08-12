@@ -327,6 +327,7 @@ luaopen_pf(lua_State *L)
 	luapf_states_register(L);
 	luapf_tables_register(L);
 	luapf_rules_register(L);
+	luapf_privsep_register(L);
 
 	return 1;
 }

@@ -24,6 +24,7 @@ int pfgetstate(lua_State *L);
 int pfclearstates(lua_State *L);
 void luapf_tables_register(lua_State *L);
 void luapf_rules_register(lua_State *L);
+void luapf_privsep_register(lua_State *L);
 
 /* anchor.c */
 int pfanchors(lua_State *L);
