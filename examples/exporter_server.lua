@@ -1,7 +1,9 @@
 -- Serves pf metrics over HTTP: exporter_server.lua [address] [port] [user].
 --
--- A collector holds /dev/pf; the network process drops privilege and pledges.
--- The "pf" promise covers rule writers only, so reading rules under it aborts.
+-- Neither process keeps privilege. The kernel gates pf by the open mode of
+-- the descriptor, not by uid, so a read-only descriptor reads everything and
+-- is refused every write. Only the network process can pledge: the "pf"
+-- promise covers rule writers, and reading rules under it aborts.
 
 package.path = (arg[0]:match("^(.*)/") or ".") .. "/?.lua;" .. package.path
 
@@ -179,7 +181,7 @@ if unistd.geteuid() ~= 0 then
 end
 
 local pw = pwd.getpwnam(user) or die("no such user: " .. user)
-local pffd = fcntl.open("/dev/pf", fcntl.O_RDWR) or die("cannot open /dev/pf")
+local pffd = fcntl.open("/dev/pf", fcntl.O_RDONLY) or die("cannot open /dev/pf")
 
 signal.signal(signal.SIGPIPE, signal.SIG_IGN)
 
@@ -191,6 +193,14 @@ assert(socket.listen(listenfd, 8))
 
 local parentsock, childsock = assert(socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM, 0))
 
+assert(pf.privsep.setgroups(pw.pw_gid))
+assert(pf.privsep.setresgid(pw.pw_gid, pw.pw_gid, pw.pw_gid))
+assert(pf.privsep.setresuid(pw.pw_uid, pw.pw_uid, pw.pw_uid))
+
+if unistd.geteuid() == 0 or unistd.getuid() == 0 then
+	die("still root after the drop")
+end
+
 local pid = assert(unistd.fork())
 
 if pid == 0 then
@@ -201,14 +211,6 @@ end
 
 unistd.close(childsock)
 unistd.close(pffd)
-
-assert(pf.privsep.setgroups(pw.pw_gid))
-assert(pf.privsep.setresgid(pw.pw_gid, pw.pw_gid, pw.pw_gid))
-assert(pf.privsep.setresuid(pw.pw_uid, pw.pw_uid, pw.pw_uid))
-
-if unistd.geteuid() == 0 or unistd.getuid() == 0 then
-	die("still root after the drop")
-end
 
 assert(pf.privsep.pledge("stdio inet", nil))
 
