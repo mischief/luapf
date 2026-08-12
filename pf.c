@@ -206,7 +206,7 @@ pfgc(lua_State *L)
 	return 0;
 }
 
-static const luaL_Reg pfmeta[] = {
+static const luaL_Reg pfmethods[] = {
     {"start", pfstart},
     {"stop", pfstop},
     {"status", pfstatus},
@@ -222,6 +222,10 @@ static const luaL_Reg pfmeta[] = {
     {"cleartables", pfcleartables},
     {"deletetables", pfdeletetables},
 
+    {NULL, NULL},
+};
+
+static const luaL_Reg pfmeta[] = {
     {"__gc", pfgc},
     {NULL, NULL},
 };
@@ -265,7 +269,7 @@ luaopen_pf(lua_State *L)
 
 	luaL_newmetatable(L, PF_MT);
 	luaL_setfuncs(L, pfmeta, 0);
-	lua_pushvalue(L, -1);
+	luaL_newlib(L, pfmethods);
 	lua_setfield(L, -2, "__index");
 	lua_pop(L, 1);
 

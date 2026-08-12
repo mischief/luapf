@@ -32,12 +32,14 @@ static int pftableclear(lua_State *L);
 static int pftableadd(lua_State *L);
 static int pftabledelete(lua_State *L);
 
+/* Methods reachable as t:name(); __index searches this, then the properties. */
+static const luaL_Reg pftablemethods[] = {
+    {"addresses", pftableaddresses}, {"test", pftabletest},
+    {"clear", pftableclear},         {"add", pftableadd},
+    {"delete", pftabledelete},       {NULL, NULL},
+};
+
 static const luaL_Reg pftablemeta[] = {
-    {"addresses", pftableaddresses},
-    {"test", pftabletest},
-    {"clear", pftableclear},
-    {"add", pftableadd},
-    {"delete", pftabledelete},
     {"__index", pftableindex},
     {"__pairs", pftablepairs},
     {"__len", pftablelen},
@@ -383,7 +385,7 @@ pftableindex(lua_State *L)
 
 	(void)luaL_checkudata(L, 1, PFTABLE_MT);
 
-	for (const luaL_Reg *r = pftablemeta; r->name != NULL; r++) {
+	for (const luaL_Reg *r = pftablemethods; r->name != NULL; r++) {
 		if (strcmp(r->name, k) == 0) {
 			lua_pushcfunction(L, r->func);
 			return 1;
