@@ -21,6 +21,9 @@ void luapf_states_register(lua_State *L);
 void luapf_tables_register(lua_State *L);
 void luapf_rules_register(lua_State *L);
 
+/* anchor.c */
+int pfanchors(lua_State *L);
+
 /* queue.c */
 int pfqueues(lua_State *L);
 

@@ -217,6 +217,7 @@ static const luaL_Reg pfmethods[] = {
     {"queues",       pfqueues      },
 
     {"rules",        pfrules       },
+    {"anchors",      pfanchors     },
 
     {"tables",       pftables      },
     {"gettable",     pfgettable    },

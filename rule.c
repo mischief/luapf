@@ -33,6 +33,21 @@ static const char *const actionnames[] = {
     "match", "divert",   "route-to", "af-to",
 };
 
+/* An anchor call prints as its anchor keyword instead of its action. */
+static const char *const anchornames[] = {
+    "anchor",     "anchor",       "anchor",       "anchor",     "nat-anchor",
+    "nat-anchor", "binat-anchor", "binat-anchor", "rdr-anchor", "rdr-anchor",
+};
+
+static const char *
+anchorname(uint8_t action)
+{
+	if (action >= sizeof(anchornames) / sizeof(anchornames[0]))
+		return "anchor";
+
+	return anchornames[action];
+}
+
 static const char *
 actionname(uint8_t action)
 {
@@ -530,9 +545,16 @@ pfruletostring(lua_State *L)
 
 	luaL_buffinit(L, &b);
 
-	luaL_addstring(&b, actionname(r->rule.action));
+	if (r->anchor_call[0] != '\0') {
+		luaL_addstring(&b, anchorname(r->rule.action));
+		luaL_addstring(&b, " \"");
+		luaL_addstring(&b, r->anchor_call);
+		luaL_addchar(&b, '"');
+	} else {
+		luaL_addstring(&b, actionname(r->rule.action));
+	}
 
-	if (r->rule.action == PF_DROP) {
+	if (r->anchor_call[0] == '\0' && r->rule.action == PF_DROP) {
 		if (r->rule.rule_flag & PFRULE_RETURN)
 			luaL_addstring(&b, " return");
 		else if (r->rule.rule_flag & PFRULE_RETURNRST)

@@ -21,6 +21,13 @@ for _, r in ipairs(rules) do
 	assert(keys > 0)
 end
 
+local anchors = h:anchors()
+assert(type(anchors) == "table")
+for _, a in ipairs(anchors) do
+	assert(type(a) == "string" and #a > 0)
+	assert(type(h:rules(a)) == "table")
+end
+
 -- the kernel rejects an anchor that does not exist
 local ok, err = pcall(h.rules, h, "nonexistent-anchor")
 assert(not ok)
