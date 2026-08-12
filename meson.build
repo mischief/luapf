@@ -1,7 +1,42 @@
-project('luapf', 'c', meson_version: '>=1.6.0')
+project('luapf', 'c',
+  meson_version: '>=1.6.0',
+  default_options: [
+    'c_std=c17',
+    'warning_level=3',
+  ])
 
 cc = meson.get_compiler('c')
 pkgconfig = import('pkgconfig')
+
+# Extra warnings, applied only where the compiler knows them.
+hardening_args = [
+  '-Wnull-dereference',
+  '-Warray-bounds',
+  '-Wsign-conversion',
+  '-Wformat',
+  '-Wformat-security',
+  '-Wuninitialized',
+  '-Wshadow',
+  '-Wimplicit-fallthrough',
+  '-Wstrict-prototypes',
+  '-Wmissing-prototypes',
+  '-Wmissing-declarations',
+  '-Wvla',
+  '-Walloca',
+  '-Wframe-larger-than=2048',
+  '-Wno-unused-parameter',
+]
+
+if get_option('trap')
+  # A trap kills the whole lua interpreter with no message. Test builds only.
+  hardening_args += '-fsanitize-trap=all'
+endif
+
+foreach a : hardening_args
+  if cc.has_argument(a)
+    add_project_arguments(a, language: 'c')
+  endif
+endforeach
 
 which_lua = get_option('lua')
 
@@ -68,3 +103,16 @@ devenv = environment()
 devenv.append('LUA_CPATH', meson.current_build_dir() / '?.so', separator: ';')
 meson.add_devenv(devenv)
 
+
+cppcheck = find_program('cppcheck', required: false)
+if cppcheck.found()
+  run_target('cppcheck',
+    command: [
+      cppcheck,
+      '--project=' + meson.project_build_root() / 'compile_commands.json',
+      '--enable=warning,style,performance,portability',
+      '--std=' + get_option('c_std'),
+      '--error-exitcode=1',
+    ],
+  )
+endif
