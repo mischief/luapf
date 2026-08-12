@@ -282,11 +282,27 @@ pfopen(lua_State *L)
 	return 1;
 }
 
+/*
+ * Adopts a descriptor already open on /dev/pf, so a process can open it while
+ * privileged and use it after dropping. The handle closes it on collection.
+ */
 static int
 pfopenfd(lua_State *L)
 {
-	/* XXX: take fd / luaL_Stream wrapped fd */
-	luaL_error(L, "notyet");
+	int fd = (int)luaL_checkinteger(L, 1);
+	struct luapf *pf;
+	struct pf_status st;
+
+	if (fd < 0)
+		luaL_error(L, "bad descriptor %d", fd);
+
+	if (ioctl(fd, DIOCGETSTATUS, &st) < 0)
+		luaL_error(L, "descriptor %d is not /dev/pf: %s", fd,
+		           strerror(errno));
+
+	pf = lua_newuserdata(L, sizeof(*pf));
+	luaL_setmetatable(L, PF_MT);
+	pf->fd = fd;
 
 	return 1;
 }

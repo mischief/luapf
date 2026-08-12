@@ -6,6 +6,12 @@ local M = {}
 
 local handle
 
+-- Adopts a descriptor already open on /dev/pf, for a caller that opens it
+-- while privileged and then drops.
+function M.usefd(fd)
+	handle = pf.openfd(fd)
+end
+
 -- Reuses one /dev/pf descriptor across calls.
 function M.collect()
 	local out = {}

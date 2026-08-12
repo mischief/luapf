@@ -1,17 +1,23 @@
 -- Serves pf metrics over HTTP for prometheus to scrape.
 --
---   exporter_server.lua [address] [port]      default 127.0.0.1 9107
+--   exporter_server.lua [address] [port] [user]   default 127.0.0.1 9107
+--
+-- Given a user it opens /dev/pf, binds the port, then becomes that user.
 
 package.path = (arg[0]:match("^(.*)/") or ".") .. "/?.lua;" .. package.path
 
+local fcntl = require("posix.fcntl")
+local pwd = require("posix.pwd")
 local signal = require("posix.signal")
 local socket = require("posix.sys.socket")
 local unistd = require("posix.unistd")
 
+local pf = require("pf")
 local pfmetrics = require("pfmetrics")
 
 local address = arg[1] or "127.0.0.1"
 local port = tonumber(arg[2]) or 9107
+local user = arg[3]
 
 -- A client that hangs up mid-write must not take the server with it.
 signal.signal(signal.SIGPIPE, signal.SIG_IGN)
@@ -21,6 +27,21 @@ local listenfd = assert(socket.socket(socket.AF_INET, socket.SOCK_STREAM, 0))
 assert(socket.setsockopt(listenfd, socket.SOL_SOCKET, socket.SO_REUSEADDR, 1))
 assert(socket.bind(listenfd, { family = socket.AF_INET, addr = address, port = port }))
 assert(socket.listen(listenfd, 8))
+
+-- Everything that needs privilege happens before the drop: the pf descriptor
+-- and the listening socket both outlive it.
+if user then
+	local pw = assert(pwd.getpwnam(user), "no such user: " .. tostring(user))
+
+	pfmetrics.usefd(assert(fcntl.open("/dev/pf", fcntl.O_RDWR)))
+
+	assert(unistd.setpid("g", pw.pw_gid))
+	assert(unistd.setpid("u", pw.pw_uid))
+
+	if unistd.geteuid() == 0 or unistd.getuid() == 0 then
+		error("still running as root after the drop")
+	end
+end
 
 local function writeall(fd, s)
 	local off = 0
