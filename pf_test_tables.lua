@@ -32,5 +32,27 @@ t1:add({"127.0.0.1", "127.0.0.2", "127.0.0.3"})
 t1 = handle:gettable("test1")
 
 assert(#t1 == 3, "test1 len should be 3")
+
+-- in place refresh sees what add did
+t1:add("127.0.0.4")
+assert(#t1 == 3)
+assert(t1:refresh() == t1)
+assert(#t1 == 4)
+
+assert(t1.counters == false)
+-- a table that is neither persistent nor referenced is dropped when its
+-- flags change, so keep it alive
+assert(t1:setflags({ counters = true, persist = true }) == 1)
+t1:refresh()
+assert(t1.counters == true)
+
+local stats = t1:addrstats()
+assert(#stats == 4)
+for _, a in ipairs(stats) do
+	assert(type(a.address) == "string")
+	assert(a.packets_in == 0 and a.bytes_out == 0)
+	assert(type(a.cleared) == "number")
+end
+
 handle:deletetables("test1")
 

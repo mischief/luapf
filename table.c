@@ -32,6 +32,8 @@ static int pftableclear(lua_State *L);
 static int pftableadd(lua_State *L);
 static int pftabledelete(lua_State *L);
 static int pftablerefresh(lua_State *L);
+static int pftableaddrstats(lua_State *L);
+static int pftablesetflags(lua_State *L);
 
 /* Methods reachable as t:name(); __index searches this, then the properties. */
 static const luaL_Reg pftablemethods[] = {
@@ -41,6 +43,8 @@ static const luaL_Reg pftablemethods[] = {
     {"add",       pftableadd      },
     {"delete",    pftabledelete   },
     {"refresh",   pftablerefresh  },
+    {"addrstats", pftableaddrstats},
+    {"setflags",  pftablesetflags },
     {NULL,        NULL            },
 };
 
@@ -52,67 +56,224 @@ static const luaL_Reg pftablemeta[] = {
     {NULL,      NULL        },
 };
 
+/* Copies the table name and anchor into an ioctl request. */
+static void
+settablename(struct pfioc_table *pt, const struct pfr_table *t)
+{
+	strlcpy(pt->pfrio_table.pfrt_anchor, t->pfrt_anchor,
+	        sizeof(pt->pfrio_table.pfrt_anchor));
+	strlcpy(pt->pfrio_table.pfrt_name, t->pfrt_name,
+	        sizeof(pt->pfrio_table.pfrt_name));
+}
+
+/* Pushes "10.0.0.0/8", or "10.0.0.1" when the entry covers a single host. */
+static void
+pushaddr(lua_State *L, const struct pfr_addr *pa)
+{
+	char addr[INET6_ADDRSTRLEN];
+	int hostnet;
+
+	switch (pa->pfra_af) {
+	case AF_INET:
+		hostnet = 32;
+		break;
+	case AF_INET6:
+		hostnet = 128;
+		break;
+	default:
+		lua_pushnil(L);
+		return;
+	}
+
+	/* TODO: change to inet_net_ntop */
+	if (inet_ntop(pa->pfra_af, &pa->pfra_u, addr, sizeof(addr)) == NULL)
+		luaL_error(L, "inet_ntop: %s", strerror(errno));
+
+	if (pa->pfra_net < hostnet)
+		lua_pushfstring(L, "%s/%d", addr, pa->pfra_net);
+	else
+		lua_pushstring(L, addr);
+}
+
+static struct luapf *
+tablepf(lua_State *L, const struct luapftable *lpft)
+{
+	lua_rawgeti(L, LUA_REGISTRYINDEX, lpft->luapfref);
+
+	return luaL_checkudata(L, -1, PF_MT);
+}
+
 static int
 pftableaddresses(lua_State *L)
 {
 	struct luapftable *lpft = luaL_checkudata(L, 1, PFTABLE_MT);
-	struct luapf *pf;
+	struct luapf *pf = tablepf(L, lpft);
 	struct pfioc_table pt;
-	struct pfr_addr *pat, *pa;
-	int hostnet;
-	int i, ii;
-	char addr[INET6_ADDRSTRLEN + 4]; // for net
-
-	lua_rawgeti(L, LUA_REGISTRYINDEX, lpft->luapfref);
-	pf = luaL_checkudata(L, -1, PF_MT);
+	const struct pfr_addr *pat;
+	int n = 1;
 
 	memset(&pt, 0, sizeof(pt));
-	pt.pfrio_esize = sizeof(*pa);
-
-	strlcpy(pt.pfrio_table.pfrt_name, lpft->table->pfrt_name,
-	        sizeof(pt.pfrio_table.pfrt_name));
+	pt.pfrio_esize = sizeof(struct pfr_addr);
+	settablename(&pt, lpft->table);
 
 	if (ioctl(pf->fd, DIOCRGETADDRS, &pt) < 0)
 		luaL_error(L, "DIOCRGETADDRS: %s", strerror(errno));
 
 	pt.pfrio_buffer =
-	    lua_newuserdata(L, sizeof(*pa) * (size_t)pt.pfrio_size);
-	memset(pt.pfrio_buffer, 0, sizeof(*pa) * (size_t)pt.pfrio_size);
+	    lua_newuserdata(L, sizeof(struct pfr_addr) * (size_t)pt.pfrio_size);
+	memset(pt.pfrio_buffer, 0,
+	       sizeof(struct pfr_addr) * (size_t)pt.pfrio_size);
 
 	if (ioctl(pf->fd, DIOCRGETADDRS, &pt) < 0)
-		luaL_error(L, "DIOCRGETTABLES: %s", strerror(errno));
+		luaL_error(L, "DIOCRGETADDRS: %s", strerror(errno));
 
 	pat = pt.pfrio_buffer;
 
 	lua_newtable(L);
 
-	for (i = 0, ii = 1; i < pt.pfrio_size; i++) {
-		pa = &pat[i];
+	for (int i = 0; i < pt.pfrio_size; i++) {
+		pushaddr(L, &pat[i]);
+		if (lua_isnil(L, -1)) {
+			lua_pop(L, 1);
+			continue;
+		}
+		lua_rawseti(L, -2, n++);
+	}
 
-		switch (pa->pfra_af) {
-		case AF_INET:
-			hostnet = 32;
-			goto ntop;
-		case AF_INET6:
-			hostnet = 128;
-		ntop:
-			// TODO: change to inet_net_ntop
-			if (inet_ntop(pa->pfra_af, &pa->pfra_u, addr,
-			              sizeof(addr)) == NULL)
-				luaL_error(L, "inet_ntop: %s", strerror(errno));
+	return 1;
+}
 
-			if (pa->pfra_net < hostnet)
-				lua_pushfstring(L, "%s/%d", addr, pa->pfra_net);
-			else
-				lua_pushstring(L, addr);
-			break;
+static uint64_t
+addrsum(const uint64_t v[PFR_OP_ADDR_MAX])
+{
+	uint64_t sum = 0;
 
-		default:
+	for (int op = 0; op < PFR_OP_ADDR_MAX; op++)
+		sum += v[op];
+
+	return sum;
+}
+
+/*
+ * Per-address counters. The kernel only keeps these while the table carries
+ * the counters flag, which t:setflags{counters = true} turns on.
+ */
+static int
+pftableaddrstats(lua_State *L)
+{
+	struct luapftable *lpft = luaL_checkudata(L, 1, PFTABLE_MT);
+	struct luapf *pf = tablepf(L, lpft);
+	struct pfioc_table pt;
+	const struct pfr_astats *as;
+	int n = 1;
+
+	memset(&pt, 0, sizeof(pt));
+	pt.pfrio_esize = sizeof(struct pfr_astats);
+	settablename(&pt, lpft->table);
+
+	if (ioctl(pf->fd, DIOCRGETASTATS, &pt) < 0)
+		luaL_error(L, "DIOCRGETASTATS: %s", strerror(errno));
+
+	pt.pfrio_buffer = lua_newuserdata(L, sizeof(struct pfr_astats) *
+	                                         (size_t)pt.pfrio_size);
+	memset(pt.pfrio_buffer, 0,
+	       sizeof(struct pfr_astats) * (size_t)pt.pfrio_size);
+
+	if (ioctl(pf->fd, DIOCRGETASTATS, &pt) < 0)
+		luaL_error(L, "DIOCRGETASTATS: %s", strerror(errno));
+
+	as = pt.pfrio_buffer;
+
+	lua_newtable(L);
+
+	for (int i = 0; i < pt.pfrio_size; i++) {
+		const struct pfr_astats *a = &as[i];
+
+		pushaddr(L, &a->pfras_a);
+		if (lua_isnil(L, -1)) {
+			lua_pop(L, 1);
 			continue;
 		}
 
-		lua_rawseti(L, -2, ii++);
+		lua_newtable(L);
+		lua_insert(L, -2);
+		lua_setfield(L, -2, "address");
+
+		lua_pushinteger(
+		    L, (lua_Integer)addrsum(a->pfras_packets[PFR_DIR_IN]));
+		lua_setfield(L, -2, "packets_in");
+		lua_pushinteger(
+		    L, (lua_Integer)addrsum(a->pfras_packets[PFR_DIR_OUT]));
+		lua_setfield(L, -2, "packets_out");
+		lua_pushinteger(
+		    L, (lua_Integer)addrsum(a->pfras_bytes[PFR_DIR_IN]));
+		lua_setfield(L, -2, "bytes_in");
+		lua_pushinteger(
+		    L, (lua_Integer)addrsum(a->pfras_bytes[PFR_DIR_OUT]));
+		lua_setfield(L, -2, "bytes_out");
+		lua_pushinteger(L, (lua_Integer)a->pfras_tzero);
+		lua_setfield(L, -2, "cleared");
+
+		lua_rawseti(L, -2, n++);
 	}
+
+	return 1;
+}
+
+/* Reads one optional boolean field, folding it into the set or clear mask. */
+static void
+flagfield(lua_State *L, int idx, const char *name, int flag, int *set, int *clr)
+{
+	if (lua_getfield(L, idx, name) != LUA_TNIL) {
+		if (lua_toboolean(L, -1))
+			*set |= flag;
+		else
+			*clr |= flag;
+	}
+
+	lua_pop(L, 1);
+}
+
+/*
+ * Sets or clears persist, const and counters; a nil field is left alone.
+ * The kernel drops a table that ends up neither persistent nor referenced.
+ */
+static int
+pftablesetflags(lua_State *L)
+{
+	struct luapftable *lpft = luaL_checkudata(L, 1, PFTABLE_MT);
+	struct luapf *pf;
+	struct pfioc_table pt;
+	struct pfr_table *tp;
+	int set = 0;
+	int clr = 0;
+
+	luaL_checktype(L, 2, LUA_TTABLE);
+
+	flagfield(L, 2, "persist", PFR_TFLAG_PERSIST, &set, &clr);
+	flagfield(L, 2, "const", PFR_TFLAG_CONST, &set, &clr);
+	flagfield(L, 2, "counters", PFR_TFLAG_COUNTERS, &set, &clr);
+
+	pf = tablepf(L, lpft);
+
+	memset(&pt, 0, sizeof(pt));
+	pt.pfrio_esize = sizeof(*tp);
+	pt.pfrio_size = 1;
+	pt.pfrio_setflag = set;
+	pt.pfrio_clrflag = clr;
+
+	/* The kernel rejects a request that carries any flags of its own. */
+	tp = lua_newuserdata(L, sizeof(*tp));
+	memset(tp, 0, sizeof(*tp));
+	strlcpy(tp->pfrt_anchor, lpft->table->pfrt_anchor,
+	        sizeof(tp->pfrt_anchor));
+	strlcpy(tp->pfrt_name, lpft->table->pfrt_name, sizeof(tp->pfrt_name));
+	pt.pfrio_buffer = tp;
+
+	if (ioctl(pf->fd, DIOCRSETTFLAGS, &pt) < 0)
+		luaL_error(L, "DIOCRSETTFLAGS: %s", strerror(errno));
+
+	lua_pushinteger(L, (lua_Integer)pt.pfrio_nchange);
 
 	return 1;
 }
