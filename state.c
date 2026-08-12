@@ -258,21 +258,21 @@ state_bytes_out(lua_State *L, int idx)
 }
 
 static const struct ro_property state_properties[] = {
-    {"id", state_id},
-    {"ifname", state_ifname},
-    {"proto", state_proto},
-    {"direction", state_direction},
-    {"rule", state_rule},
-    {"creation", state_creation},
-    {"expire", state_expire},
-    {"source", state_source},
+    {"id",          state_id         },
+    {"ifname",      state_ifname     },
+    {"proto",       state_proto      },
+    {"direction",   state_direction  },
+    {"rule",        state_rule       },
+    {"creation",    state_creation   },
+    {"expire",      state_expire     },
+    {"source",      state_source     },
     {"destination", state_destination},
-    {"gateway", state_gateway},
-    {"packets_in", state_packets_in},
+    {"gateway",     state_gateway    },
+    {"packets_in",  state_packets_in },
     {"packets_out", state_packets_out},
-    {"bytes_in", state_bytes_in},
-    {"bytes_out", state_bytes_out},
-    {NULL, NULL},
+    {"bytes_in",    state_bytes_in   },
+    {"bytes_out",   state_bytes_out  },
+    {NULL,          NULL             },
 };
 
 static int
@@ -306,7 +306,7 @@ pfstatepairs(lua_State *L)
 static const luaL_Reg pfstatemeta[] = {
     {"__index", pfstateindex},
     {"__pairs", pfstatepairs},
-    {NULL, NULL},
+    {NULL,      NULL        },
 };
 
 static int
@@ -355,10 +355,10 @@ pfstatesgc(lua_State *L)
 }
 
 static const luaL_Reg pfstatesmeta[] = {
-    {"__len", pfstateslen},
+    {"__len",   pfstateslen  },
     {"__index", pfstatesindex},
-    {"__gc", pfstatesgc},
-    {NULL, NULL},
+    {"__gc",    pfstatesgc   },
+    {NULL,      NULL         },
 };
 
 void

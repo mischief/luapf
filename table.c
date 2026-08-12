@@ -31,20 +31,25 @@ static int pftabletest(lua_State *L);
 static int pftableclear(lua_State *L);
 static int pftableadd(lua_State *L);
 static int pftabledelete(lua_State *L);
+static int pftablerefresh(lua_State *L);
 
 /* Methods reachable as t:name(); __index searches this, then the properties. */
 static const luaL_Reg pftablemethods[] = {
-    {"addresses", pftableaddresses}, {"test", pftabletest},
-    {"clear", pftableclear},         {"add", pftableadd},
-    {"delete", pftabledelete},       {NULL, NULL},
+    {"addresses", pftableaddresses},
+    {"test",      pftabletest     },
+    {"clear",     pftableclear    },
+    {"add",       pftableadd      },
+    {"delete",    pftabledelete   },
+    {"refresh",   pftablerefresh  },
+    {NULL,        NULL            },
 };
 
 static const luaL_Reg pftablemeta[] = {
     {"__index", pftableindex},
     {"__pairs", pftablepairs},
-    {"__len", pftablelen},
-    {"__gc", pftablegc},
-    {NULL, NULL},
+    {"__len",   pftablelen  },
+    {"__gc",    pftablegc   },
+    {NULL,      NULL        },
 };
 
 static int
@@ -486,30 +491,28 @@ table_refcnt_anchor(lua_State *L, int idx)
 	return 1;
 }
 
-/* clang-format off */
 static const struct ro_property table_properties[] = {
-    {"anchor", table_anchor},
-    {"name", table_name},
-    {"persist", table_persist},
-    {"const", table_const},
-    {"active", table_active},
-    {"inactive", table_inactive},
-    {"referenced", table_referenced},
-    {"refdanchor", table_refdanchor},
-    {"counters", table_counters},
+    {"anchor",          table_anchor         },
+    {"name",            table_name           },
+    {"persist",         table_persist        },
+    {"const",           table_const          },
+    {"active",          table_active         },
+    {"inactive",        table_inactive       },
+    {"referenced",      table_referenced     },
+    {"refdanchor",      table_refdanchor     },
+    {"counters",        table_counters       },
     {"addresses_count", table_addresses_count},
-    {"match", table_match},
-    {"nomatch", table_nomatch},
-    {"packets_in", table_packets_in},
-    {"packets_out", table_packets_out},
-    {"bytes_in", table_bytes_in},
-    {"bytes_out", table_bytes_out},
-    {"cleared", table_cleared},
-    {"refcnt_rule", table_refcnt_rule},
-    {"refcnt_anchor", table_refcnt_anchor},
-    {NULL, NULL},
+    {"match",           table_match          },
+    {"nomatch",         table_nomatch        },
+    {"packets_in",      table_packets_in     },
+    {"packets_out",     table_packets_out    },
+    {"bytes_in",        table_bytes_in       },
+    {"bytes_out",       table_bytes_out      },
+    {"cleared",         table_cleared        },
+    {"refcnt_rule",     table_refcnt_rule    },
+    {"refcnt_anchor",   table_refcnt_anchor  },
+    {NULL,              NULL                 },
 };
-/* clang-format on */
 
 static int
 pftableindex(lua_State *L)
@@ -639,50 +642,57 @@ strtotable(lua_State *L, const char *s, struct pfr_table *t)
 	}
 }
 
+/*
+ * DIOCRGETTSTATS filters by anchor only, so ask for every table in the anchor
+ * and pick out the one named. The buffer is a lua userdata left on the stack.
+ */
+static const struct pfr_tstats *
+findtstats(lua_State *L, int fd, const struct pfr_table *want)
+{
+	struct pfioc_table pt;
+	const struct pfr_tstats *tables;
+
+	memset(&pt, 0, sizeof(pt));
+	pt.pfrio_table = *want;
+	pt.pfrio_esize = sizeof(struct pfr_tstats);
+
+	if (ioctl(fd, DIOCRGETTSTATS, &pt) < 0)
+		luaL_error(L, "DIOCRGETTSTATS: %s", strerror(errno));
+
+	pt.pfrio_buffer = lua_newuserdata(L, sizeof(struct pfr_tstats) *
+	                                         (size_t)pt.pfrio_size);
+	memset(pt.pfrio_buffer, 0,
+	       sizeof(struct pfr_tstats) * (size_t)pt.pfrio_size);
+
+	if (ioctl(fd, DIOCRGETTSTATS, &pt) < 0)
+		luaL_error(L, "DIOCRGETTSTATS: %s", strerror(errno));
+
+	tables = pt.pfrio_buffer;
+
+	for (int i = 0; i < pt.pfrio_size; i++) {
+		if (strcmp(tables[i].pfrts_t.pfrt_anchor, want->pfrt_anchor) ==
+		        0 &&
+		    strcmp(tables[i].pfrts_t.pfrt_name, want->pfrt_name) == 0)
+			return &tables[i];
+	}
+
+	return NULL;
+}
+
 int
 pfgettable(lua_State *L)
 {
 	struct luapf *pf = luaL_checkudata(L, 1, PF_MT);
 	struct luapftable *lpft;
-	struct pfioc_table pt;
-	struct pfr_tstats *tables, *t = NULL;
-	int i;
+	struct pfr_table want;
+	const struct pfr_tstats *t;
 	const char *s = luaL_checkstring(L, 2);
 
-	memset(&pt, 0, sizeof(pt));
+	memset(&want, 0, sizeof(want));
+	strtotable(L, s, &want);
 
-	// XXX: DIOCRGETTSTATS can't filter by table name, only anchor, so we
-	// have to ask the kernel for all tables in an anchor.
-	// XXX: kernel ignores table pfrt_name here, this is just to filter
-	// anchor
-
-	strtotable(L, s, &pt.pfrio_table);
-
-	pt.pfrio_esize = sizeof(struct pfr_tstats);
-
-	if (ioctl(pf->fd, DIOCRGETTSTATS, &pt) < 0)
-		luaL_error(L, "DIOCRGETTSTATS: %s", strerror(errno));
-
-	pt.pfrio_buffer =
-	    lua_newuserdata(L, sizeof(*t) * (size_t)pt.pfrio_size);
-	memset(pt.pfrio_buffer, 0, sizeof(*t) * (size_t)pt.pfrio_size);
-
-	if (ioctl(pf->fd, DIOCRGETTSTATS, &pt) < 0)
-		luaL_error(L, "DIOCRGETTSTATS: %s", strerror(errno));
-
-	tables = pt.pfrio_buffer;
-
-	for (i = 0; i < pt.pfrio_size; i++) {
-		if (!strcmp(tables[i].pfrts_t.pfrt_anchor,
-		            pt.pfrio_table.pfrt_anchor) &&
-		    !strcmp(tables[i].pfrts_t.pfrt_name,
-		            pt.pfrio_table.pfrt_name)) {
-			t = &tables[i];
-			break;
-		}
-	}
-
-	if (!t) {
+	t = findtstats(L, pf->fd, &want);
+	if (t == NULL) {
 		lua_pushnil(L);
 		return 1;
 	}
@@ -694,6 +704,30 @@ pfgettable(lua_State *L)
 	lpft->luapfref = luaL_ref(L, LUA_REGISTRYINDEX);
 	memcpy(&lpft->stats, t, sizeof(lpft->stats));
 	lpft->table = &lpft->stats.pfrts_t;
+
+	return 1;
+}
+
+/* Re-read the counters of an existing table object in place. */
+static int
+pftablerefresh(lua_State *L)
+{
+	struct luapftable *lpft = luaL_checkudata(L, 1, PFTABLE_MT);
+	struct luapf *pf;
+	const struct pfr_tstats *t;
+	struct pfr_table want = *lpft->table;
+
+	lua_rawgeti(L, LUA_REGISTRYINDEX, lpft->luapfref);
+	pf = luaL_checkudata(L, -1, PF_MT);
+
+	t = findtstats(L, pf->fd, &want);
+	if (t == NULL)
+		luaL_error(L, "table %s no longer exists", want.pfrt_name);
+
+	memcpy(&lpft->stats, t, sizeof(lpft->stats));
+	lpft->table = &lpft->stats.pfrts_t;
+
+	lua_pushvalue(L, 1);
 
 	return 1;
 }

@@ -43,3 +43,6 @@ SortIncludes:           Never
 # spaces for mid-line alignment so it cannot reproduce this correctly.
 # Do it by hand or omit it; do not enable this.
 AlignConsecutiveDeclarations: false
+
+# One struct initializer per line; do not bin-pack them side by side.
+AlignArrayOfStructures: Left

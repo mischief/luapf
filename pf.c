@@ -207,27 +207,27 @@ pfgc(lua_State *L)
 }
 
 static const luaL_Reg pfmethods[] = {
-    {"start", pfstart},
-    {"stop", pfstop},
-    {"status", pfstatus},
+    {"start",        pfstart       },
+    {"stop",         pfstop        },
+    {"status",       pfstatus      },
 
-    {"states", pfstates},
-    {"killstates", pfkillstates},
+    {"states",       pfstates      },
+    {"killstates",   pfkillstates  },
 
-    {"queues", pfqueues},
+    {"queues",       pfqueues      },
 
-    {"tables", pftables},
-    {"gettable", pfgettable},
-    {"addtables", pfaddtables},
-    {"cleartables", pfcleartables},
+    {"tables",       pftables      },
+    {"gettable",     pfgettable    },
+    {"addtables",    pfaddtables   },
+    {"cleartables",  pfcleartables },
     {"deletetables", pfdeletetables},
 
-    {NULL, NULL},
+    {NULL,           NULL          },
 };
 
 static const luaL_Reg pfmeta[] = {
     {"__gc", pfgc},
-    {NULL, NULL},
+    {NULL,   NULL},
 };
 
 static int
@@ -257,9 +257,9 @@ pfopenfd(lua_State *L)
 }
 
 static const luaL_Reg pflib[] = {
-    {"open", pfopen},
+    {"open",   pfopen  },
     {"openfd", pfopenfd},
-    {NULL, NULL},
+    {NULL,     NULL    },
 };
 
 LUAPF_EXPORT int
