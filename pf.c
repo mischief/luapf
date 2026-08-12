@@ -207,25 +207,33 @@ pfgc(lua_State *L)
 }
 
 static const luaL_Reg pfmethods[] = {
-    {"start",        pfstart       },
-    {"stop",         pfstop        },
-    {"status",       pfstatus      },
+    {"start",         pfstart        },
+    {"stop",          pfstop         },
+    {"status",        pfstatus       },
 
-    {"states",       pfstates      },
-    {"killstates",   pfkillstates  },
+    {"states",        pfstates       },
+    {"killstates",    pfkillstates   },
 
-    {"queues",       pfqueues      },
+    {"queues",        pfqueues       },
 
-    {"rules",        pfrules       },
-    {"anchors",      pfanchors     },
+    {"rules",         pfrules        },
+    {"anchors",       pfanchors      },
 
-    {"tables",       pftables      },
-    {"gettable",     pfgettable    },
-    {"addtables",    pfaddtables   },
-    {"cleartables",  pfcleartables },
-    {"deletetables", pfdeletetables},
+    {"interfaces",    pfinterfaces   },
+    {"limits",        pflimits       },
+    {"timeouts",      pftimeouts     },
 
-    {NULL,           NULL          },
+    {"srcnodes",      pfsrcnodes     },
+    {"killsrcnodes",  pfkillsrcnodes },
+    {"clearsrcnodes", pfclearsrcnodes},
+
+    {"tables",        pftables       },
+    {"gettable",      pfgettable     },
+    {"addtables",     pfaddtables    },
+    {"cleartables",   pfcleartables  },
+    {"deletetables",  pfdeletetables },
+
+    {NULL,            NULL           },
 };
 
 static const luaL_Reg pfmeta[] = {

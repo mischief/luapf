@@ -30,6 +30,14 @@ int pfqueues(lua_State *L);
 /* rule.c */
 int pfrules(lua_State *L);
 
+/* system.c */
+int pflimits(lua_State *L);
+int pftimeouts(lua_State *L);
+int pfinterfaces(lua_State *L);
+int pfsrcnodes(lua_State *L);
+int pfkillsrcnodes(lua_State *L);
+int pfclearsrcnodes(lua_State *L);
+
 /* table.c */
 int pftables(lua_State *L);
 int pfgettable(lua_State *L);
