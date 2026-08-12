@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <sys/ioctl.h>
 #include <sys/socket.h>
 
 #include <arpa/inet.h>
@@ -46,6 +47,16 @@ state_id(lua_State *L, int idx)
 	struct pfsync_state *s = luaL_checkudata(L, idx, PFSTATE_MT);
 
 	lua_pushinteger(L, (lua_Integer)betoh64(s->id));
+
+	return 1;
+}
+
+static int
+state_creatorid(lua_State *L, int idx)
+{
+	struct pfsync_state *s = luaL_checkudata(L, idx, PFSTATE_MT);
+
+	lua_pushinteger(L, (lua_Integer)betoh32(s->creatorid));
 
 	return 1;
 }
@@ -259,6 +270,7 @@ state_bytes_out(lua_State *L, int idx)
 
 static const struct ro_property state_properties[] = {
     {"id",          state_id         },
+    {"creatorid",   state_creatorid  },
     {"ifname",      state_ifname     },
     {"proto",       state_proto      },
     {"direction",   state_direction  },
@@ -360,6 +372,59 @@ static const luaL_Reg pfstatesmeta[] = {
     {"__gc",    pfstatesgc   },
     {NULL,      NULL         },
 };
+
+/* One state by id, as reported by the id and creatorid properties. */
+int
+pfgetstate(lua_State *L)
+{
+	struct luapf *pf = luaL_checkudata(L, 1, PF_MT);
+	lua_Integer id = luaL_checkinteger(L, 2);
+	lua_Integer creatorid = luaL_optinteger(L, 3, 0);
+	struct pfioc_state *ps;
+	struct pfsync_state *s;
+
+	ps = lua_newuserdata(L, sizeof(*ps));
+	memset(ps, 0, sizeof(*ps));
+
+	ps->state.id = htobe64((uint64_t)id);
+	ps->state.creatorid = htobe32((uint32_t)creatorid);
+
+	if (ioctl(pf->fd, DIOCGETSTATE, ps) < 0) {
+		if (errno == ENOENT) {
+			lua_pushnil(L);
+			return 1;
+		}
+		luaL_error(L, "DIOCGETSTATE: %s", strerror(errno));
+	}
+
+	s = lua_newuserdata(L, sizeof(*s));
+	luaL_setmetatable(L, PFSTATE_MT);
+	*s = ps->state;
+
+	return 1;
+}
+
+/* Removes every state, or every state on one interface. */
+int
+pfclearstates(lua_State *L)
+{
+	struct luapf *pf = luaL_checkudata(L, 1, PF_MT);
+	const char *ifname = luaL_optstring(L, 2, "");
+	struct pfioc_state_kill psk;
+
+	memset(&psk, 0, sizeof(psk));
+
+	if (strlcpy(psk.psk_ifname, ifname, sizeof(psk.psk_ifname)) >=
+	    sizeof(psk.psk_ifname))
+		luaL_error(L, "interface name too long");
+
+	if (ioctl(pf->fd, DIOCCLRSTATES, &psk) < 0)
+		luaL_error(L, "DIOCCLRSTATES: %s", strerror(errno));
+
+	lua_pushinteger(L, (lua_Integer)psk.psk_killed);
+
+	return 1;
+}
 
 void
 luapf_states_register(lua_State *L)

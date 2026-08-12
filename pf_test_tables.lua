@@ -54,5 +54,16 @@ for _, a in ipairs(stats) do
 	assert(type(a.cleared) == "number")
 end
 
+-- replace swaps the whole content in one step
+local added, deleted = t1:replace({ "127.0.0.10", "127.0.0.11" })
+assert(added == 2)
+assert(deleted == 4)
+t1:refresh()
+assert(#t1 == 2)
+assert(t1:test("127.0.0.10") == true)
+assert(t1:test("127.0.0.1") == false)
+
+assert(type(t1:clearaddrstats()) == "number")
+
 handle:deletetables("test1")
 

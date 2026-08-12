@@ -51,3 +51,17 @@ end
 
 local ok, err = pcall(h.killsrcnodes, h, "not-an-ip")
 assert(not ok and err:find("bad address"))
+
+-- clearing states on an interface with none is a no-op
+assert(h:clearstates("lo0") == 0)
+
+local st = h:states()[1]
+if st then
+	local one = h:getstate(st.id, st.creatorid)
+	assert(one)
+	assert(one.source == st.source)
+	assert(one.destination == st.destination)
+end
+
+-- an id that cannot exist reads as nil, not an error
+assert(h:getstate(1, 1) == nil)

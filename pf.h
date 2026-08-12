@@ -18,6 +18,10 @@ struct luapf {
 LUAPF_EXPORT int luaopen_pf(lua_State *L);
 
 void luapf_states_register(lua_State *L);
+
+/* state.c */
+int pfgetstate(lua_State *L);
+int pfclearstates(lua_State *L);
 void luapf_tables_register(lua_State *L);
 void luapf_rules_register(lua_State *L);
 
@@ -44,5 +48,6 @@ int pfgettable(lua_State *L);
 int pfaddtables(lua_State *L);
 int pfcleartables(lua_State *L);
 int pfdeletetables(lua_State *L);
+int pfclearalltables(lua_State *L);
 
 #endif /* LUAPF_PF_H */

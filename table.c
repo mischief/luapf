@@ -34,18 +34,23 @@ static int pftabledelete(lua_State *L);
 static int pftablerefresh(lua_State *L);
 static int pftableaddrstats(lua_State *L);
 static int pftablesetflags(lua_State *L);
+static int pftablereplace(lua_State *L);
+static int pftableclearaddrstats(lua_State *L);
+static void argstoaddrs(lua_State *L, struct pfioc_table *pt);
 
 /* Methods reachable as t:name(); __index searches this, then the properties. */
 static const luaL_Reg pftablemethods[] = {
-    {"addresses", pftableaddresses},
-    {"test",      pftabletest     },
-    {"clear",     pftableclear    },
-    {"add",       pftableadd      },
-    {"delete",    pftabledelete   },
-    {"refresh",   pftablerefresh  },
-    {"addrstats", pftableaddrstats},
-    {"setflags",  pftablesetflags },
-    {NULL,        NULL            },
+    {"addresses",      pftableaddresses     },
+    {"test",           pftabletest          },
+    {"clear",          pftableclear         },
+    {"add",            pftableadd           },
+    {"delete",         pftabledelete        },
+    {"refresh",        pftablerefresh       },
+    {"addrstats",      pftableaddrstats     },
+    {"setflags",       pftablesetflags      },
+    {"replace",        pftablereplace       },
+    {"clearaddrstats", pftableclearaddrstats},
+    {NULL,             NULL                 },
 };
 
 static const luaL_Reg pftablemeta[] = {
@@ -232,6 +237,49 @@ flagfield(lua_State *L, int idx, const char *name, int flag, int *set, int *clr)
 	}
 
 	lua_pop(L, 1);
+}
+
+/* Replaces the whole content of a table in one step. */
+static int
+pftablereplace(lua_State *L)
+{
+	struct luapftable *lpft = luaL_checkudata(L, 1, PFTABLE_MT);
+	struct luapf *pf = tablepf(L, lpft);
+	struct pfioc_table pt;
+
+	memset(&pt, 0, sizeof(pt));
+	settablename(&pt, lpft->table);
+
+	argstoaddrs(L, &pt);
+
+	if (ioctl(pf->fd, DIOCRSETADDRS, &pt) < 0)
+		luaL_error(L, "DIOCRSETADDRS: %s", strerror(errno));
+
+	lua_pushinteger(L, (lua_Integer)pt.pfrio_nadd);
+	lua_pushinteger(L, (lua_Integer)pt.pfrio_ndel);
+	lua_pushinteger(L, (lua_Integer)pt.pfrio_nchange);
+
+	return 3;
+}
+
+/* Zeroes the per-address counters, leaving the addresses in place. */
+static int
+pftableclearaddrstats(lua_State *L)
+{
+	struct luapftable *lpft = luaL_checkudata(L, 1, PFTABLE_MT);
+	struct luapf *pf = tablepf(L, lpft);
+	struct pfioc_table pt;
+
+	memset(&pt, 0, sizeof(pt));
+	pt.pfrio_esize = sizeof(struct pfr_addr);
+	settablename(&pt, lpft->table);
+
+	if (ioctl(pf->fd, DIOCRCLRASTATS, &pt) < 0)
+		luaL_error(L, "DIOCRCLRASTATS: %s", strerror(errno));
+
+	lua_pushinteger(L, (lua_Integer)pt.pfrio_nzero);
+
+	return 1;
 }
 
 /*
@@ -968,6 +1016,29 @@ pfcleartables(lua_State *L)
 	memset(&pt, 0, sizeof(pt));
 	multitableop(L, &pt, DIOCRCLRTSTATS, "DIOCRCLRTSTATS");
 	lua_pushinteger(L, pt.pfrio_nzero);
+
+	return 1;
+}
+
+/* Deletes every table in an anchor, defaulting to the main ruleset. */
+int
+pfclearalltables(lua_State *L)
+{
+	struct luapf *pf = luaL_checkudata(L, 1, PF_MT);
+	const char *anchor = luaL_optstring(L, 2, "");
+	struct pfioc_table pt;
+
+	memset(&pt, 0, sizeof(pt));
+
+	if (strlcpy(pt.pfrio_table.pfrt_anchor, anchor,
+	            sizeof(pt.pfrio_table.pfrt_anchor)) >=
+	    sizeof(pt.pfrio_table.pfrt_anchor))
+		luaL_error(L, "anchor name too long");
+
+	if (ioctl(pf->fd, DIOCRCLRTABLES, &pt) < 0)
+		luaL_error(L, "DIOCRCLRTABLES: %s", strerror(errno));
+
+	lua_pushinteger(L, (lua_Integer)pt.pfrio_ndel);
 
 	return 1;
 }

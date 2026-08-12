@@ -193,6 +193,26 @@ pfkillstates(lua_State *L)
 	return 1;
 }
 
+/* Zeroes the global counters, or the counters of one interface. */
+static int
+pfclearstatus(lua_State *L)
+{
+	struct luapf *pf = luaL_checkudata(L, 1, PF_MT);
+	const char *ifname = luaL_optstring(L, 2, "");
+	struct pfioc_iface pi;
+
+	memset(&pi, 0, sizeof(pi));
+
+	if (strlcpy(pi.pfiio_name, ifname, sizeof(pi.pfiio_name)) >=
+	    sizeof(pi.pfiio_name))
+		luaL_error(L, "interface name too long");
+
+	if (ioctl(pf->fd, DIOCCLRSTATUS, &pi) < 0)
+		luaL_error(L, "DIOCCLRSTATUS: %s", strerror(errno));
+
+	return 0;
+}
+
 static int
 pfgc(lua_State *L)
 {
@@ -207,33 +227,37 @@ pfgc(lua_State *L)
 }
 
 static const luaL_Reg pfmethods[] = {
-    {"start",         pfstart        },
-    {"stop",          pfstop         },
-    {"status",        pfstatus       },
+    {"start",          pfstart         },
+    {"stop",           pfstop          },
+    {"status",         pfstatus        },
+    {"clearstatus",    pfclearstatus   },
 
-    {"states",        pfstates       },
-    {"killstates",    pfkillstates   },
+    {"states",         pfstates        },
+    {"killstates",     pfkillstates    },
+    {"getstate",       pfgetstate      },
+    {"clearstates",    pfclearstates   },
 
-    {"queues",        pfqueues       },
+    {"queues",         pfqueues        },
 
-    {"rules",         pfrules        },
-    {"anchors",       pfanchors      },
+    {"rules",          pfrules         },
+    {"anchors",        pfanchors       },
 
-    {"interfaces",    pfinterfaces   },
-    {"limits",        pflimits       },
-    {"timeouts",      pftimeouts     },
+    {"interfaces",     pfinterfaces    },
+    {"limits",         pflimits        },
+    {"timeouts",       pftimeouts      },
 
-    {"srcnodes",      pfsrcnodes     },
-    {"killsrcnodes",  pfkillsrcnodes },
-    {"clearsrcnodes", pfclearsrcnodes},
+    {"srcnodes",       pfsrcnodes      },
+    {"killsrcnodes",   pfkillsrcnodes  },
+    {"clearsrcnodes",  pfclearsrcnodes },
 
-    {"tables",        pftables       },
-    {"gettable",      pfgettable     },
-    {"addtables",     pfaddtables    },
-    {"cleartables",   pfcleartables  },
-    {"deletetables",  pfdeletetables },
+    {"tables",         pftables        },
+    {"gettable",       pfgettable      },
+    {"addtables",      pfaddtables     },
+    {"cleartables",    pfcleartables   },
+    {"deletetables",   pfdeletetables  },
+    {"clearalltables", pfclearalltables},
 
-    {NULL,            NULL           },
+    {NULL,             NULL            },
 };
 
 static const luaL_Reg pfmeta[] = {
