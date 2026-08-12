@@ -370,13 +370,146 @@ table_counters(lua_State *L, int idx)
 	return tableflag(L, idx, PFR_TFLAG_COUNTERS);
 }
 
+/* Packet and byte counters sum every match type, as pfctl -vsT prints them. */
+static uint64_t
+tablesum(const struct luapftable *lpft, int dir, int bytes)
+{
+	const uint64_t *v = bytes ? lpft->stats.pfrts_bytes[dir]
+	                          : lpft->stats.pfrts_packets[dir];
+	uint64_t sum = 0;
+
+	for (int op = 0; op < PFR_OP_TABLE_MAX; op++)
+		sum += v[op];
+
+	return sum;
+}
+
+static int
+table_packets_in(lua_State *L, int idx)
+{
+	struct luapftable *lpft = luaL_checkudata(L, idx, PFTABLE_MT);
+
+	lua_pushinteger(L, (lua_Integer)tablesum(lpft, PFR_DIR_IN, 0));
+
+	return 1;
+}
+
+static int
+table_packets_out(lua_State *L, int idx)
+{
+	struct luapftable *lpft = luaL_checkudata(L, idx, PFTABLE_MT);
+
+	lua_pushinteger(L, (lua_Integer)tablesum(lpft, PFR_DIR_OUT, 0));
+
+	return 1;
+}
+
+static int
+table_bytes_in(lua_State *L, int idx)
+{
+	struct luapftable *lpft = luaL_checkudata(L, idx, PFTABLE_MT);
+
+	lua_pushinteger(L, (lua_Integer)tablesum(lpft, PFR_DIR_IN, 1));
+
+	return 1;
+}
+
+static int
+table_bytes_out(lua_State *L, int idx)
+{
+	struct luapftable *lpft = luaL_checkudata(L, idx, PFTABLE_MT);
+
+	lua_pushinteger(L, (lua_Integer)tablesum(lpft, PFR_DIR_OUT, 1));
+
+	return 1;
+}
+
+static int
+table_match(lua_State *L, int idx)
+{
+	struct luapftable *lpft = luaL_checkudata(L, idx, PFTABLE_MT);
+
+	lua_pushinteger(L, (lua_Integer)lpft->stats.pfrts_match);
+
+	return 1;
+}
+
+static int
+table_nomatch(lua_State *L, int idx)
+{
+	struct luapftable *lpft = luaL_checkudata(L, idx, PFTABLE_MT);
+
+	lua_pushinteger(L, (lua_Integer)lpft->stats.pfrts_nomatch);
+
+	return 1;
+}
+
+static int
+table_addresses_count(lua_State *L, int idx)
+{
+	struct luapftable *lpft = luaL_checkudata(L, idx, PFTABLE_MT);
+
+	lua_pushinteger(L, (lua_Integer)lpft->stats.pfrts_cnt);
+
+	return 1;
+}
+
+static int
+table_cleared(lua_State *L, int idx)
+{
+	struct luapftable *lpft = luaL_checkudata(L, idx, PFTABLE_MT);
+
+	lua_pushinteger(L, (lua_Integer)lpft->stats.pfrts_tzero);
+
+	return 1;
+}
+
+static int
+table_refcnt_rule(lua_State *L, int idx)
+{
+	struct luapftable *lpft = luaL_checkudata(L, idx, PFTABLE_MT);
+
+	lua_pushinteger(L,
+	                (lua_Integer)lpft->stats.pfrts_refcnt[PFR_REFCNT_RULE]);
+
+	return 1;
+}
+
+static int
+table_refcnt_anchor(lua_State *L, int idx)
+{
+	struct luapftable *lpft = luaL_checkudata(L, idx, PFTABLE_MT);
+
+	lua_pushinteger(
+	    L, (lua_Integer)lpft->stats.pfrts_refcnt[PFR_REFCNT_ANCHOR]);
+
+	return 1;
+}
+
+/* clang-format off */
 static const struct ro_property table_properties[] = {
-    {"anchor", table_anchor},         {"name", table_name},
-    {"persist", table_persist},       {"const", table_const},
-    {"active", table_active},         {"inactive", table_inactive},
-    {"referenced", table_referenced}, {"refdanchor", table_refdanchor},
-    {"counters", table_counters},     {NULL, NULL},
+    {"anchor", table_anchor},
+    {"name", table_name},
+    {"persist", table_persist},
+    {"const", table_const},
+    {"active", table_active},
+    {"inactive", table_inactive},
+    {"referenced", table_referenced},
+    {"refdanchor", table_refdanchor},
+    {"counters", table_counters},
+    {"addresses_count", table_addresses_count},
+    {"match", table_match},
+    {"nomatch", table_nomatch},
+    {"packets_in", table_packets_in},
+    {"packets_out", table_packets_out},
+    {"bytes_in", table_bytes_in},
+    {"bytes_out", table_bytes_out},
+    {"cleared", table_cleared},
+    {"refcnt_rule", table_refcnt_rule},
+    {"refcnt_anchor", table_refcnt_anchor},
+    {NULL, NULL},
 };
+/* clang-format on */
 
 static int
 pftableindex(lua_State *L)
