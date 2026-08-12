@@ -1,60 +1,64 @@
-#ifndef propertyh
-#define propertyh
+/* SPDX-License-Identifier: ISC */
+#ifndef LUAPF_PROPERTY_H
+#define LUAPF_PROPERTY_H
 
-typedef int (*ro_property_getter) (lua_State*, int);
+#include <string.h>
 
+#include <lua.h>
+#include <lauxlib.h>
+
+/*
+ * Read-only properties of a userdata, served from a NULL-terminated table.
+ * The getter reads the userdata at stack index idx and pushes one value.
+ */
 struct ro_property {
-	STAILQ_ENTRY(ro_property) link;
 	const char *name;
-	ro_property_getter get;
+	int (*get)(lua_State *, int);
 };
 
-STAILQ_HEAD(ro_property_head, ro_property);
+/* __index: push the value of the named property, or nil. */
+static inline int
+ro_property_lookup(lua_State *L, const struct ro_property *props, int mtidx,
+                   int keyidx)
+{
+	const char *key = luaL_checkstring(L, keyidx);
 
-// make a 'struct ro_property pfx_field_property'
-#define ro_property_generate(pfx, field) \
-	static int pfx##_##field##_get(lua_State*, int); \
-	struct ro_property pfx##_##field##_property = { \
-		.name = #field, \
-		.get = pfx##_##field##_get, \
-	}; \
-	static int pfx##_##field##_get(lua_State *L, int idx)
+	for (const struct ro_property *p = props; p->name != NULL; p++) {
+		if (strcmp(p->name, key) == 0)
+			return p->get(L, mtidx);
+	}
 
-#define ro_property_lookup(state, props, mtidx, keyidx) \
-	const char *key = luaL_checkstring(state, keyidx); \
-	struct ro_property *prop; \
-	STAILQ_FOREACH(prop, props, link) { \
-		if(!strcmp(prop->name, key)) \
-			break; \
-	} \
-	if(prop == STAILQ_END(props)){ \
-		lua_pushnil(state); \
-		return 1; \
-	} \
-	prop->get(state, mtidx); \
-	return 1
+	lua_pushnil(L);
 
-#define ro_property_pairs(state, props, mtidx, keyidx) \
-	const char *key; \
-	struct ro_property *prop; \
-	if(lua_isnil(L, keyidx)){ \
-		prop = STAILQ_FIRST(props); \
-	} else { \
-		key = luaL_checkstring(L, keyidx); \
-		STAILQ_FOREACH(prop, props, link) { \
-			if(!strcmp(prop->name, key)){ \
-				prop = STAILQ_NEXT(prop, link); \
-				break; \
-			} \
-		} \
-	} \
-	if(prop == STAILQ_END(props)){ \
-		lua_pushnil(L); \
-		return 1; \
-	} \
-	lua_pushstring(L, prop->name); \
-	prop->get(L, mtidx); \
-	return 2 \
+	return 1;
+}
 
-#endif
+/* __pairs iterator: push the property after keyidx and its value. */
+static inline int
+ro_property_next(lua_State *L, const struct ro_property *props, int mtidx,
+                 int keyidx)
+{
+	const struct ro_property *p = props;
 
+	if (!lua_isnil(L, keyidx)) {
+		const char *key = luaL_checkstring(L, keyidx);
+
+		for (; p->name != NULL; p++) {
+			if (strcmp(p->name, key) == 0) {
+				p++;
+				break;
+			}
+		}
+	}
+
+	if (p->name == NULL) {
+		lua_pushnil(L);
+		return 1;
+	}
+
+	lua_pushstring(L, p->name);
+
+	return 1 + p->get(L, mtidx);
+}
+
+#endif /* LUAPF_PROPERTY_H */

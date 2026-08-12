@@ -1,26 +1,32 @@
-#ifndef luapfh
-#define luapfh
+/* SPDX-License-Identifier: ISC */
+#ifndef LUAPF_PF_H
+#define LUAPF_PF_H
 
 #define PF_MT "PFMT"
 #define PFSTATES_MT "PFSTATESMT"
 #define PFSTATE_MT "PFSTATEMT"
 #define PFTABLE_MT "PFTABLEMT"
 
+/* The build hides every symbol; the lua loader needs this one. */
+#define LUAPF_EXPORT __attribute__((visibility("default")))
+
 struct luapf {
 	int fd;
 };
 
-void luapf_states_register(lua_State*);
-void luapf_tables_register(lua_State*);
+LUAPF_EXPORT int luaopen_pf(lua_State *L);
 
-int pfqueues(lua_State*);
+void luapf_states_register(lua_State *L);
+void luapf_tables_register(lua_State *L);
+
+/* queue.c */
+int pfqueues(lua_State *L);
 
 /* table.c */
-int pftables(lua_State*);
+int pftables(lua_State *L);
 int pfgettable(lua_State *L);
 int pfaddtables(lua_State *L);
 int pfcleartables(lua_State *L);
 int pfdeletetables(lua_State *L);
 
-#endif
-
+#endif /* LUAPF_PF_H */

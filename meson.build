@@ -3,6 +3,7 @@ project('luapf', 'c',
   default_options: [
     'c_std=c17',
     'warning_level=3',
+    'werror=true',
   ])
 
 cc = meson.get_compiler('c')
@@ -88,6 +89,7 @@ lua_bin = find_program(dep_name)
 
 pf_tests = '''
 pf_test_tables.lua
+pf_test_states.lua
 '''.split()
 
 foreach t : pf_tests
