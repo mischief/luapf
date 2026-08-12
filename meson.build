@@ -24,7 +24,7 @@ hardening_args = [
   '-Wmissing-declarations',
   '-Wvla',
   '-Walloca',
-  '-Wframe-larger-than=2048',
+  '-Wframe-larger-than=8192',
   '-Wno-unused-parameter',
 ]
 
