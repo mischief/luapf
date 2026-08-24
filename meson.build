@@ -87,6 +87,53 @@ endif
 doas_bin = find_program('doas')
 lua_bin = find_program(dep_name)
 
+# serialutil: the C module examples/luapf_console.lua needs to open a raw
+# tty and poll it non-blockingly, for driving a disposable vmd(8) test VM
+# entirely over its serial console (see examples/run_pf_vm_tests.sh and
+# examples/build_test_vm_base.sh). Native regardless of what -Dlua targets,
+# since this runs on the machine driving the VM, not inside it -- and
+# vendored here rather than pulled from nlos, so this repo's VM-building
+# machinery does not depend on another project's tree being checked out
+# beside it.
+serialutil = shared_module('serialutil', 'examples/serialutil/serialutil.c',
+  dependencies: [lua_dep],
+  native: true,
+  name_prefix: '',
+)
+
+# One LUA_CPATH entry reaches every native module this project builds
+# (pf.so, serialutil.so, and whatever else lands in the build root),
+# rather than a `depends:`/env pair repeated at every test/script that
+# needs one of them -- so a script or test says require("pf") or
+# require("serialutil") whether meson is running it or a person is:
+#
+#	eval "$(meson devenv -C build --dump)"
+#	doas lua54 pf_test_tables.lua
+#	doas lua54 examples/luapf_console.lua ...
+#
+# Prepended, so the build tree wins: a module installed under one of
+# our names -- pf is an ordinary enough word -- must not answer instead
+# of the one just built.
+#
+# The ';;' goes last, as its own append, where lua expands it to the
+# compiled-in default. Behind the caller's own entries rather than
+# ahead of them, so a module we do not have resolves the way it would
+# outside a build, and a module we do have never loses to it.
+#
+# Registered twice, same as the module list itself is single-sourced:
+# once as the devenv above, and again as the default test setup, so
+# `meson test` and an interactive `meson devenv` shell see the same
+# modules without this list being kept in sync by hand in two places.
+# `test()` below still needs `depends:` -- `meson test` only builds what
+# the selected tests declare, not `all`, so a module absent from that
+# list would simply not exist yet when a subset of tests is run.
+lua_host_env = environment()
+lua_host_env.prepend('LUA_CPATH', meson.current_build_dir() / '?.so',
+  separator: ';')
+lua_host_env.append('LUA_CPATH', ';', separator: ';')
+meson.add_devenv(lua_host_env)
+add_test_setup('default', is_default: true, env: lua_host_env)
+
 pf_tests = '''
 pf_test_tables.lua
 pf_test_states.lua
@@ -102,10 +149,6 @@ foreach t : pf_tests
     workdir: meson.current_build_dir()
   )
 endforeach
-
-devenv = environment()
-devenv.append('LUA_CPATH', meson.current_build_dir() / '?.so', separator: ';')
-meson.add_devenv(devenv)
 
 
 cppcheck = find_program('cppcheck', required: false)
