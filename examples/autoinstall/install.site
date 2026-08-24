@@ -1,0 +1,32 @@
+#!/bin/ksh -e
+# Mark this image as an intentionally disposable luapf PF test VM.
+touch /etc/luapf-test-vm
+# Do not retain the temporary host-side release-set server as installurl.
+echo 'https://cdn.openbsd.org/pub/OpenBSD/7.9/amd64' >/etc/installurl
+
+# rc(8) reads this early, before it starts services.
+echo 'library_aslr=NO' >/etc/rc.conf.local
+
+# Plain getty+login on the serial console (tty00, the line the
+# installer actually enables when com0 is the console -- the "console"
+# alias in /etc/ttys ships commented out and unused).  A hand-rolled
+# agent taking over /dev/console from rc.local was tried and produced
+# no visible output at all after boot; abandoned in favor of the
+# well-trodden path: log in as root over the console the ordinary way,
+# then drive it from the host with an expect-style script (see
+# examples/luapf_console.lua).  File transfer is base64 lines through
+# that same shell, not ZMODEM -- see luapf_console.lua's push() for why
+# (vmd's emulated com0 has no FIFO/flow control and desyncs lrzsz).
+#
+# Deliberately NOT using rc.firsttime for package installation: rc(8)
+# runs it right after `sh /etc/netstart`, which only *starts*
+# dhcpleased/resolvd asynchronously -- it doesn't wait for a lease or a
+# working resolv.conf. That race was lost often enough in practice
+# (pkg_add failing with "no address associated with name" while
+# dhcpleased was still converging) to be worth avoiding rather than
+# racing again with a sleep/retry loop baked into the ramdisk. Instead,
+# build_test_vm_base.sh drives package installation itself, the same
+# way it drives everything else: log in over the console once the
+# installer's own automatic post-install reboot reaches a login prompt,
+# and only then -- with the console driver free to actually verify the
+# network is up first -- run pkg_add.
