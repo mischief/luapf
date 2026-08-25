@@ -94,22 +94,61 @@ listchildren(lua_State *L, int fd, const char *path, int pidx, int ridx,
 	return (int)count;
 }
 
+/*
+ * Returns how many rules an anchor holds. DIOCGETRULES answers with the
+ * count and a ticket, so no rule is copied out of the kernel to count it.
+ * The ticket is released again: a ticket left open pins the ruleset.
+ */
+static uint32_t
+rulecount(lua_State *L, int fd, const char *path)
+{
+	struct pfioc_rule *pr;
+	uint32_t nr, ticket;
+	int top = lua_gettop(L);
+
+	/* Two PATH_MAX arrays make this far too big for the stack. */
+	pr = lua_newuserdata(L, sizeof(*pr));
+	memset(pr, 0, sizeof(*pr));
+
+	if (strlcpy(pr->anchor, path, sizeof(pr->anchor)) >= sizeof(pr->anchor))
+		luaL_error(L, "anchor path too long");
+
+	pr->rule.action = PF_PASS;
+
+	if (ioctl(fd, DIOCGETRULES, pr) < 0)
+		luaL_error(L, "DIOCGETRULES: %s", strerror(errno));
+
+	nr = pr->nr;
+	ticket = pr->ticket;
+	(void)ioctl(fd, DIOCXEND, &ticket);
+
+	lua_settop(L, top);
+
+	return nr;
+}
+
 /***
 List every anchor below a root.
 
 The kernel reports direct children only, so this walks the tree. Paths are
-full and sorted, matching pfctl -s Anchors.
+full and sorted, matching pfctl -s Anchors -v. With counts set, every entry
+is instead a table of the path and the rule count of that anchor, read with
+one ioctl and no rule copied. Counting is off by default so that a plain
+listing does not pay for it.
 @function pf:anchors
 @string[opt=""] root
-@treturn table array of anchor paths
+@bool[opt=false] counts return {path=,rules=} entries instead of paths
+@treturn table array of anchor paths, or of tables when counts is set
 @raise if the root anchor does not exist
-@usage for _, a in ipairs(h:anchors()) do print(a, #h:rules(a)) end
+@usage for _, a in ipairs(h:anchors()) do print(a) end
+@usage for _, a in ipairs(h:anchors("", true)) do print(a.path, a.rules) end
 */
 int
 pfanchors(lua_State *L)
 {
 	struct luapf *pf = luaL_checkudata(L, 1, PF_MT);
 	const char *root = luaL_optstring(L, 2, "");
+	int counts = lua_toboolean(L, 3);
 	const char **names;
 	int found = 0;
 	int pidx, ridx;
@@ -159,7 +198,18 @@ pfanchors(lua_State *L)
 	lua_newtable(L);
 
 	for (int i = 0; i < found; i++) {
-		lua_pushstring(L, names[i]);
+		if (counts) {
+			uint32_t n = rulecount(L, pf->fd, names[i]);
+
+			lua_createtable(L, 0, 2);
+			lua_pushstring(L, names[i]);
+			lua_setfield(L, -2, "path");
+			lua_pushinteger(L, (lua_Integer)n);
+			lua_setfield(L, -2, "rules");
+		} else {
+			lua_pushstring(L, names[i]);
+		}
+
 		lua_rawseti(L, -2, i + 1);
 	}
 
