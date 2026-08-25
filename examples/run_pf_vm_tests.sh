@@ -20,12 +20,24 @@ network=${3:-isolated}
 name=${LUAPF_VM_NAME:-$(basename "${overlay%.qcow2}")}
 transcript=${LUAPF_VM_TRANSCRIPT:-"$root/.vm/$name-console.log"}
 tests=${LUAPF_VM_TESTS:-"pf_test_tables.lua pf_test_states.lua \
-pf_test_rules.lua pf_test_queues.lua pf_test_system.lua pf_test_nat.lua"}
+pf_test_rules.lua pf_test_queues.lua pf_test_system.lua pf_test_nat.lua \
+pf_test_rw.lua"}
 # Every guest rule carries `log`, and pflog0 is captured for the whole run,
 # so a failed test comes back with the packets that reached PF rather than
 # only rule counters. The dump is bounded because it returns over the same
 # 115200 serial console as everything else.
 pflog_lines=${LUAPF_VM_PFLOG_LINES:-120}
+# LUAPF_VM_COVERAGE builds the guest copy instrumented and reports what the
+# run reached. The guest needs nothing extra for this: cc and llvm-cov are
+# both in the OpenBSD base system. privsep.c is left out of the summary --
+# it serves the examples, and nothing under test calls it.
+if [[ -n ${LUAPF_VM_COVERAGE:-} ]]; then
+	cov_setup="-Dfuzz=false -Dc_args=--coverage -Dc_link_args=--coverage"
+	cov_report='llvm-cov gcov -n build/pf.so.p/pf.c.gcda build/pf.so.p/state.c.gcda build/pf.so.p/rule.c.gcda build/pf.so.p/table.c.gcda build/pf.so.p/system.c.gcda build/pf.so.p/queue.c.gcda build/pf.so.p/anchor.c.gcda 2>/dev/null | grep -B1 "Lines executed" | grep -v "^--"'
+else
+	cov_setup=
+	cov_report='true'
+fi
 
 # qcow2 stores the backing filename as supplied to vmctl create.  vmd may
 # resolve that filename from a different working directory, so make both
@@ -121,7 +133,7 @@ mkdir -p "$(dirname "$transcript")"
 # the tty.
 guest_script=$(mktemp)
 cat >"$guest_script" <<GUEST
-set -e; cd /root; rm -rf luapf; mkdir luapf; tar -xzhf /root/source.tgz -C luapf; cd luapf; meson setup build; ninja -C build; printf '%s\n' 'pass log' | pfctl -f -; ifconfig pflog0 up; tcpdump -n -i pflog0 -w /tmp/pflog.pcap >/dev/null 2>&1 & pflog=\$!; sleep 1; nc -l 127.0.0.1 31337 </dev/null >/dev/null & listener=\$!; sleep 1; print x | nc -N 127.0.0.1 31337 || true; kill "\$listener" 2>/dev/null || true; export LUA_CPATH="\$PWD/build/?.so"; status=0; for test in $tests; do lua54 "\$test" || { status=\$?; break; }; done; sleep 1; kill "\$pflog" 2>/dev/null || true; sleep 1; print -- "--- pflog (last $pflog_lines of \$(tcpdump -n -r /tmp/pflog.pcap 2>/dev/null | wc -l) packets) ---"; tcpdump -n -e -ttt -r /tmp/pflog.pcap 2>&1 | tail -n $pflog_lines || true; exit \$status
+set -e; cd /root; rm -rf luapf; mkdir luapf; tar -xzhf /root/source.tgz -C luapf; cd luapf; meson setup $cov_setup build; ninja -C build; printf '%s\n' 'pass log' | pfctl -f -; ifconfig pflog0 up; tcpdump -n -i pflog0 -w /tmp/pflog.pcap >/dev/null 2>&1 & pflog=\$!; sleep 1; nc -l 127.0.0.1 31337 </dev/null >/dev/null & listener=\$!; sleep 1; print x | nc -N 127.0.0.1 31337 || true; kill "\$listener" 2>/dev/null || true; export LUA_CPATH="\$PWD/build/?.so"; status=0; for test in $tests; do lua54 "\$test" || { status=\$?; break; }; done; sleep 1; kill "\$pflog" 2>/dev/null || true; sleep 1; print -- "--- pflog (last $pflog_lines of \$(tcpdump -n -r /tmp/pflog.pcap 2>/dev/null | wc -l) packets) ---"; tcpdump -n -e -ttt -r /tmp/pflog.pcap 2>&1 | tail -n $pflog_lines || true; print -- "--- coverage ---"; $cov_report || true; exit \$status
 GUEST
 
 driver=$(mktemp)

@@ -79,6 +79,10 @@ assert(sh("ifconfig tun0 10.99.0.1 10.99.0.2 netmask 255.255.255.255 up") == "")
 
 local h = assert(pf.open())
 
+-- An earlier test may have left a state for this pairing, and PF matches an
+-- existing state before it ever reaches a translation rule.
+assert(h:clearstates() >= 0)
+
 -- Outbound: nat-to rewrites the source, and both halves of the translation
 -- are visible on the state -- `source` is what goes on the wire, `gateway`
 -- is what the stack asked for.
