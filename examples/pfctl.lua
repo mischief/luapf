@@ -84,13 +84,16 @@ function show.rules()
 	for _, r in ipairs(h:rules(opt.anchor)) do
 		print(tostring(r))
 		if opt.verbose > 0 then
+			-- Two spaces between the fields, and the packet
+			-- and byte counts are the two directions summed:
+			-- pfctl does not print the split this binding keeps.
 			print(string.format(
-			    "  [ Evaluations: %-8d Packets: %-8d " ..
-			    "Bytes: %-10d States: %-6d]",
+			    "  [ Evaluations: %-8d  Packets: %-8d  " ..
+			    "Bytes: %-10d  States: %-6d]",
 			    r.evaluations, r.packets_in + r.packets_out,
 			    r.bytes_in + r.bytes_out, r.states_cur))
 			print(string.format(
-			    "  [ Inserted: uid %u pid %u State Creations: %-5d]",
+			    "  [ Inserted: uid %u pid %u State Creations: %-6d]",
 			    r.created_uid, r.created_pid, r.states_total))
 		end
 	end
