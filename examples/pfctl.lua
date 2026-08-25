@@ -138,7 +138,10 @@ end
 
 function show.Interfaces()
 	for _, iface in ipairs(h:interfaces()) do
-		print(iface.name .. (iface.skip and " (skip)" or ""))
+		-- The skip marker is a verbose detail; plain output is
+		-- names alone.
+		print(iface.name ..
+		    ((opt.verbose > 0 and iface.skip) and " (skip)" or ""))
 	end
 end
 
@@ -189,49 +192,6 @@ end
 -- arrow, then the far end, with the other key's reading of each in
 -- parentheses when it differs. An af-to state indexes like an outbound
 -- one, which is why it also takes the outbound arrow.
--- This binding renders a v6 endpoint as [address]:port, the form a URL
--- uses. pfctl writes address[port]. Neither is wrong; only one of them is
--- what we are diffing against. A rdomain is shown only when it is not the
--- default, and belongs to the key the address came from.
-local function host(addr, rdomain)
-	local a, p = addr:match("^%[(.+)%]:(%d+)$")
-	local out = a and (a .. "[" .. p .. "]") or addr
-
-	if rdomain and rdomain ~= 0 then
-		out = "(" .. rdomain .. ") " .. out
-	end
-
-	return out
-end
-
-local function stateline(s)
-	local afto = (s.near_wire:sub(1, 1) == "[") ~=
-	    (s.near_stack:sub(1, 1) == "[")
-	local outward = s.direction == "out" or afto
-	local near = outward and s.source or s.destination
-	local far = outward and s.destination or s.source
-	local otherfar = s.direction == "out" and s.far_stack or s.far_wire
-
-	local rd, ord = s.rdomain, s.gateway_rdomain
-	local out = { s.ifname, s.proto, host(near, rd) }
-	if s.gateway ~= near or ord ~= rd then
-		out[#out + 1] = "(" .. host(s.gateway, ord) .. ")"
-	end
-	out[#out + 1] = outward and "->" or "<-"
-	out[#out + 1] = host(far, rd)
-	if otherfar ~= far or ord ~= rd then
-		out[#out + 1] = "(" .. host(otherfar, ord) .. ")"
-	end
-
-	-- The peers are ordered by direction alone. af-to moves the arrow
-	-- and the index but not these, so outward is the wrong test here.
-	local levels = s.direction == "out" and
-	    (s.src_state .. ":" .. s.dst_state) or
-	    (s.dst_state .. ":" .. s.src_state)
-
-	return table.concat(out, " ") .. "       " .. levels
-end
-
 local function hms(t)
 	return string.format("%.2d:%.2d:%.2d", t // 3600, (t % 3600) // 60,
 	    t % 60)
@@ -303,7 +263,7 @@ end
 
 function show.states()
 	for _, s in ipairs(h:states()) do
-		print(stateline(s))
+		print(tostring(s))
 		if opt.verbose > 0 then
 			print(verbosestate(s))
 		end
