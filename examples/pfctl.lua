@@ -49,21 +49,42 @@ end
 local opt = { verbose = 0, anchor = "" }
 local want
 
+-- Clustered the way getopt(3) allows, because pfctl is used that way:
+-- -vvsr is -v -v -s r, and an option's argument may be attached to it or
+-- may be the next word.
+local takesarg = { s = true, a = true }
 local i = 1
+
 while i <= #arg do
 	local a = arg[i]
-	if a == "-s" then
-		i = i + 1
-		want = arg[i] or usage()
-	elseif a == "-a" then
-		i = i + 1
-		opt.anchor = arg[i] or usage()
-	elseif a == "-v" then
-		opt.verbose = opt.verbose + 1
-	elseif a == "-vv" then
-		opt.verbose = opt.verbose + 2
-	else
+
+	if a:sub(1, 1) ~= "-" or a == "-" then
 		usage()
+	end
+
+	local j = 2
+	while j <= #a do
+		local c = a:sub(j, j)
+
+		if not takesarg[c] then
+			if c ~= "v" then
+				usage()
+			end
+			opt.verbose = opt.verbose + 1
+			j = j + 1
+		else
+			local value = a:sub(j + 1)
+			if value == "" then
+				i = i + 1
+				value = arg[i] or usage()
+			end
+			if c == "s" then
+				want = value
+			else
+				opt.anchor = value
+			end
+			j = #a + 1
+		end
 	end
 	i = i + 1
 end
@@ -347,4 +368,15 @@ function show.all()
 	end
 end
 
-show[want]()
+-- A failed ioctl is a message, not a traceback. pfctl says "Anchor does
+-- not exist" and exits 0 for this one, so match that rather than
+-- inventing a status of our own.
+local ok, err = pcall(show[want])
+if not ok then
+	err = tostring(err):gsub("^.-:%d+: ", "")
+	if err:find("DIOCGETRULES", 1, true) and opt.anchor ~= "" then
+		io.stderr:write("pfctl.lua: Anchor does not exist\n")
+		os.exit(0)
+	end
+	die("%s", err)
+end
