@@ -46,12 +46,88 @@ pushcounters(lua_State *L, uint64_t qlength, uint64_t qlimit,
 	lua_setfield(L, -2, "drop_bytes");
 }
 
-/***
-Read every queue and its statistics.
+/*
+ * Both arms are reported, but percent is always zero on this OpenBSD: the
+ * parser refuses one ("no bandwidth in % yet"). There is no rate for it to
+ * be a percentage of either -- PF is never told what a link can carry, so
+ * a root queue's bandwidth is the operator asserting it, not a measurement,
+ * and every child is relative to that assertion.
+ */
+static void
+pushbwspec(lua_State *L, const struct pf_queue_bwspec *bw, const char *name)
+{
+	lua_newtable(L);
+	lua_pushinteger(L, (lua_Integer)bw->absolute);
+	lua_setfield(L, -2, "absolute");
+	lua_pushinteger(L, (lua_Integer)bw->percent);
+	lua_setfield(L, -2, "percent");
+	lua_setfield(L, -2, name);
+}
 
-Each entry holds name, parent, ifname, qid, parent_qid, scheduler,
-queue_length, queue_limit, transmit_packets, transmit_bytes,
-drop_packets and drop_bytes, plus flows for a flow queue.
+/*
+ * A service curve is two slopes and the time the first one runs for. The
+ * burst of "burst X for Nms" is the first slope, so it needs no field of
+ * its own.
+ */
+static void
+pushscspec(lua_State *L, const struct pf_queue_scspec *sc, const char *name)
+{
+	lua_newtable(L);
+	pushbwspec(L, &sc->m1, "m1");
+	pushbwspec(L, &sc->m2, "m2");
+	lua_pushinteger(L, (lua_Integer)sc->d);
+	lua_setfield(L, -2, "d");
+	lua_setfield(L, -2, name);
+}
+
+static void
+pushfqspec(lua_State *L, const struct pf_queue_fqspec *fq)
+{
+	lua_newtable(L);
+	lua_pushinteger(L, (lua_Integer)fq->flows);
+	lua_setfield(L, -2, "flows");
+	lua_pushinteger(L, (lua_Integer)fq->quantum);
+	lua_setfield(L, -2, "quantum");
+	lua_pushinteger(L, (lua_Integer)fq->target);
+	lua_setfield(L, -2, "target");
+	lua_pushinteger(L, (lua_Integer)fq->interval);
+	lua_setfield(L, -2, "interval");
+	lua_setfield(L, -2, "flowqueue");
+}
+
+/***
+Read every queue, its configuration and its statistics.
+
+Each entry holds these identity and configuration fields:
+
+ - `name`, `parent`, `ifname`, `qid`, `parent_qid`
+ - `scheduler`, the discipline that served the queue and produced the
+   statistics below, either `"hfsc"` or `"fqcodel"`
+ - `flowqueue_class`, true when the ruleset asked for a flow queue with the
+   `flows` keyword. Only a flow queue without a parent is served by
+   fq-codel, so this is not the same thing as `scheduler`
+ - `default_queue`, true for the queue that takes packets no other queue
+   matched, and `root_class`, true for the root of an HFSC tree
+ - `flags`, the raw kernel flag word behind the two booleans above
+ - `qlimit`, the packet limit the ruleset asked for
+ - `linkshare` (pf.conf `bandwidth`), `realtime` (`min`) and `upperlimit`
+   (`max`), each a service curve `{ m1 = { absolute, percent },
+   m2 = { absolute, percent }, d }`. `m1` and `d` carry `burst X for Nms`.
+   `percent` is always zero: pf.conf takes no percentage today, and PF is
+   never told what a link carries, so a rate is whatever the ruleset said
+ - `flowqueue`, the flow queue parameters `{ flows, quantum, target,
+   interval }`. `flowqueue.flows` is the configured number of flows, which
+   is not the `flows` statistic below
+
+and these statistics:
+
+ - `queue_length`, `queue_limit` as the scheduler holds them
+ - `transmit_packets`, `transmit_bytes`, `drop_packets`, `drop_bytes`
+
+A queue that fq-codel served also holds `flows`, the number of flows in use
+right now, plus the codel delay parameters in use, `codel_target` and
+`codel_interval`, and `delay_sum` and `delay_sum_squared`, the microsecond
+sums pfctl averages to print queue delay.
 @function pf:queues
 @treturn table array of queue tables
 @raise if the ioctl fails
@@ -76,6 +152,8 @@ pfqueues(lua_State *L)
 	lua_newtable(L);
 
 	for (unsigned i = 0; i < nr; i++) {
+		int fqcodel;
+
 		memset(&stats, 0, sizeof(stats));
 
 		pqs.ticket = pq.ticket;
@@ -108,10 +186,41 @@ pfqueues(lua_State *L)
 		lua_pushinteger(L, (lua_Integer)pqs.queue.parent_qid);
 		lua_setfield(L, -2, "parent_qid");
 
-		/* The scheduler picks which arm of the union the kernel wrote.
+		lua_pushinteger(L, (lua_Integer)pqs.queue.flags);
+		lua_setfield(L, -2, "flags");
+		lua_pushboolean(L, (pqs.queue.flags & PFQS_FLOWQUEUE) != 0);
+		lua_setfield(L, -2, "flowqueue_class");
+		lua_pushboolean(L, (pqs.queue.flags & PFQS_DEFAULT) != 0);
+		lua_setfield(L, -2, "default_queue");
+		lua_pushboolean(L, (pqs.queue.flags & PFQS_ROOTCLASS) != 0);
+		lua_setfield(L, -2, "root_class");
+
+		/*
+		 * The scheduler copies this into the statistics as
+		 * queue_limit, but that is the scheduler's own value. Report
+		 * what the ruleset asked for as well.
 		 */
-		if (pqs.queue.flags & PFQS_FLOWQUEUE) {
-			lua_pushstring(L, "flow");
+		lua_pushinteger(L, (lua_Integer)pqs.queue.qlimit);
+		lua_setfield(L, -2, "qlimit");
+
+		pushscspec(L, &pqs.queue.linkshare, "linkshare");
+		pushscspec(L, &pqs.queue.realtime, "realtime");
+		pushscspec(L, &pqs.queue.upperlimit, "upperlimit");
+		pushfqspec(L, &pqs.queue.flowqueue);
+
+		/*
+		 * The kernel picks the arm of the statistics union with three
+		 * conditions, and all three have to hold before the fq-codel
+		 * fields mean anything. A flow queue with a parent is served
+		 * by HFSC, so reading flows out of it would really read
+		 * hfsc_class_stats.period.
+		 */
+		fqcodel = (pqs.queue.flags & PFQS_FLOWQUEUE) &&
+		          pqs.queue.parent_qid == 0 &&
+		          !(pqs.queue.flags & PFQS_ROOTCLASS);
+
+		if (fqcodel) {
+			lua_pushstring(L, "fqcodel");
 			lua_setfield(L, -2, "scheduler");
 
 			pushcounters(L, stats.fqc.qlength, stats.fqc.qlimit,
@@ -122,8 +231,16 @@ pfqueues(lua_State *L)
 
 			lua_pushinteger(L, (lua_Integer)stats.fqc.flows);
 			lua_setfield(L, -2, "flows");
+			lua_pushinteger(L, (lua_Integer)stats.fqc.target);
+			lua_setfield(L, -2, "codel_target");
+			lua_pushinteger(L, (lua_Integer)stats.fqc.interval);
+			lua_setfield(L, -2, "codel_interval");
+			lua_pushinteger(L, (lua_Integer)stats.fqc.delaysum);
+			lua_setfield(L, -2, "delay_sum");
+			lua_pushinteger(L, (lua_Integer)stats.fqc.delaysumsq);
+			lua_setfield(L, -2, "delay_sum_squared");
 		} else {
-			lua_pushstring(L, "fifo");
+			lua_pushstring(L, "hfsc");
 			lua_setfield(L, -2, "scheduler");
 
 			pushcounters(L, stats.hfsc.qlength, stats.hfsc.qlimit,
