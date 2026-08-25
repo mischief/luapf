@@ -193,6 +193,18 @@ if not ok then
 	os.exit(1)
 end
 
+-- Re-assert site policy after the installer has generated its final rc.conf;
+-- the installer may replace rc.conf.local while creating the installed system.
+local policy_status, policy_out = c:exec([[cat > /etc/rc.conf.local <<'EOF'
+library_aslr=NO
+EOF
+for service in cron smtpd sndiod ntpd; do rcctl disable "$service" || true; done]], 30)
+io.write(policy_out or "")
+if policy_status ~= 0 then
+	io.stderr:write("build-test-vm-base: could not apply site policy: exit " .. tostring(policy_status) .. "\n")
+	os.exit(1)
+end
+
 -- rc(8) has only just started dhcpleased/resolvd asynchronously at this
 -- point; a shell prompt answering does not mean the network is up yet.
 -- Poll for an actual working resolver rather than assume any fixed delay
