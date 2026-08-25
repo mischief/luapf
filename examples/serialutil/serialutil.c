@@ -1,24 +1,11 @@
 /* SPDX-License-Identifier: ISC */
 
-/* serialutil: the one C module luapf_console.lua needs to drive a vmd
- * guest's serial console from the host -- open a raw tty, and ask
- * whether a read on it would block. Vendored in from nlos's
- * test/hostutil.c rather than depended on: this repo's disposable-VM
- * PF test harness has to build and run on its own, without another
- * project's tree checked out beside it.
- *
- * Trimmed to just what luapf_console.lua actually calls: serial(),
- * fileno(), readable(), sleep(). nlos's original also has socket
- * connect/listen/send/recv and fork+exec process spawning, for driving
- * boards over USB and for its own test suite's host-side network
- * clients; none of that is needed here, since file transfer to the
- * guest goes over the same tty as everything else (see
- * luapf_console.lua's push(): base64 through exec(), not a spawned
- * ZMODEM sender) rather than a second process wired to the port.
- *
- * A HOST tool, built native regardless of what the rest of luapf
- * targets -- this runs on the machine driving the VM, never inside it.
- */
+/* serialutil: the C module luapf_console.lua needs to drive a vmd(8)
+ * guest's serial console -- open a raw tty, ask whether a read would
+ * block, read what has arrived. A HOST tool: it runs on the machine
+ * driving the VM, never inside it. Vendored from nlos's
+ * test/hostutil.c rather than depended on, so this repo's disposable-VM
+ * PF test harness builds without another project's tree beside it. */
 
 #include <errno.h>
 #include <fcntl.h>
@@ -50,6 +37,12 @@ l_readable(lua_State *L)
 	fd_set r;
 	int n;
 
+	/* fd_set has room for FD_SETSIZE descriptors and no bounds check of
+	 * its own: FD_SET outside that range writes past this stack frame.
+	 */
+	if (fd < 0 || fd >= FD_SETSIZE)
+		return luaL_error(L, "fd %d out of range", fd);
+
 	FD_ZERO(&r);
 	FD_SET(fd, &r);
 	tv.tv_sec = (time_t)timeout;
@@ -73,9 +66,11 @@ l_readsome(lua_State *L)
 {
 	int fd = (int)luaL_checkinteger(L, 1);
 	lua_Integer max = luaL_optinteger(L, 2, 4096);
-	char buf[65536];
+	char buf[8192];
 	ssize_t n;
 
+	if (fd < 0)
+		return luaL_error(L, "fd %d out of range", fd);
 	if (max <= 0 || (size_t)max > sizeof(buf))
 		max = (lua_Integer)sizeof(buf);
 
@@ -102,8 +97,18 @@ static int
 l_fileno(lua_State *L)
 {
 	luaL_Stream *s = (luaL_Stream *)luaL_checkudata(L, 1, LUA_FILEHANDLE);
+	int fd;
 
-	lua_pushinteger(L, fileno(s->f));
+	/* fileno() on a closed handle is undefined: l_closef leaves f NULL */
+	if (!s->f)
+		return luaL_error(L, "attempt to use a closed file");
+	fd = fileno(s->f);
+	if (fd < 0) {
+		lua_pushnil(L);
+		lua_pushstring(L, strerror(errno));
+		return 2;
+	}
+	lua_pushinteger(L, fd);
 	return 1;
 }
 
@@ -216,15 +221,33 @@ l_serial(lua_State *L)
 		return 2;
 	}
 	fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) & ~O_NONBLOCK);
-	if (tcgetattr(fd, &t) == 0) {
-		cfmakeraw(&t);
-		cfsetispeed(&t, sp);
-		cfsetospeed(&t, sp);
-		t.c_cflag |= CREAD;
-		t.c_cflag &= ~(unsigned)(CLOCAL | HUPCL);
-		t.c_cc[VMIN] = 1;
-		t.c_cc[VTIME] = 0;
-		tcsetattr(fd, TCSANOW, &t);
+	/* a line we could not put in raw mode is still in canonical mode
+	 * with echo on, and reads on it behave nothing like what every
+	 * caller here expects -- fail now rather than hand back a file
+	 * whose misbehavior shows up somewhere far from its cause.
+	 */
+	if (tcgetattr(fd, &t) != 0) {
+		int e = errno;
+
+		close(fd);
+		lua_pushnil(L);
+		lua_pushstring(L, strerror(e));
+		return 2;
+	}
+	cfmakeraw(&t);
+	cfsetispeed(&t, sp);
+	cfsetospeed(&t, sp);
+	t.c_cflag |= CREAD;
+	t.c_cflag &= ~(unsigned)(CLOCAL | HUPCL);
+	t.c_cc[VMIN] = 1;
+	t.c_cc[VTIME] = 0;
+	if (tcsetattr(fd, TCSANOW, &t) != 0) {
+		int e = errno;
+
+		close(fd);
+		lua_pushnil(L);
+		lua_pushstring(L, strerror(e));
+		return 2;
 	}
 
 	s = (luaL_Stream *)lua_newuserdatauv(L, sizeof *s, 0);
@@ -259,6 +282,9 @@ static const luaL_Reg serialutil[] = {
 	{ "sleep", l_sleep },
 	{ NULL, NULL },
 };
+
+/* The loader looks this up by name, so it is deliberately not static. */
+int luaopen_serialutil(lua_State *L);
 
 int
 luaopen_serialutil(lua_State *L)

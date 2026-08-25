@@ -157,7 +157,23 @@ local function address_from_host(headers)
 	if not host then
 		return nil
 	end
-	return host:match("^([^:]+)")
+
+	-- The value is attacker-controlled, so accept only what can name
+	-- this server: a hostname, an IPv4 literal, or a bracketed IPv6
+	-- literal, with an optional :port. Anything else takes the same
+	-- 400 path as a missing Host, since guessing at what a malformed
+	-- header meant would only hand the guest an unreachable address.
+	local literal = host:match("^(%[[%x:%.]+%])") or host:match("^([%w%-%.]+)")
+	if not literal or #literal > 255 then
+		return nil
+	end
+
+	local rest = host:sub(#literal + 1)
+	if rest ~= "" and not rest:match("^:%d+$") then
+		return nil
+	end
+
+	return literal
 end
 
 local function serve_file(fd, method, path, headers)
@@ -191,13 +207,17 @@ local function serve_file(fd, method, path, headers)
 		if body and body:find("@ADDRESS@", 1, true) then
 			local address_ = address_from_host(headers)
 			if not address_ then
-				local msg = "no Host header to render @ADDRESS@ in " ..
+				local msg = "no usable Host header to render @ADDRESS@ in " ..
 					relative .. "\n"
 				respond(fd, "400 Bad Request", "text/plain; charset=utf-8",
 					#msg, method == "GET" and msg or nil)
 				return
 			end
-			body = (body:gsub("@ADDRESS@", address_))
+			-- gsub reads % in a replacement string as a capture
+			-- reference, so escape it here as well: the substituted
+			-- text must be exactly what the guest connected to,
+			-- whatever address_from_host is taught to accept later.
+			body = (body:gsub("@ADDRESS@", (address_:gsub("%%", "%%%%"))))
 		end
 
 		respond(fd, "200 OK", content_type(relative), #body,

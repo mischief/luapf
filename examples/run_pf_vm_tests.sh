@@ -37,6 +37,10 @@ overlay="$overlay_dir/$(basename "$overlay")"
 archive="$overlay.source.tgz"
 tty=
 started=false
+created_overlay=false
+passed=false
+driver=
+guest_script=
 
 # serialutil.so is this repo's own (examples/serialutil/serialutil.c,
 # built by this project's own meson build -- see meson.build), reached
@@ -53,6 +57,20 @@ cleanup() {
 		doas vmctl stop -f "$name" >/dev/null 2>&1 || true
 	fi
 	rm -f "$archive"
+	if [[ -n $driver ]]; then
+		rm -f "$driver"
+	fi
+	if [[ -n $guest_script ]]; then
+		rm -f "$guest_script"
+	fi
+	# A successful run's overlay is kept on purpose so its disk can be
+	# inspected afterwards. A failed one is not: the script refuses to
+	# start when the overlay exists, so leaving it behind would wedge
+	# every later run under the same overlay name.
+	if ! $passed && $created_overlay; then
+		rm -f "$overlay"
+	fi
+	return 0
 }
 trap cleanup EXIT HUP INT TERM
 
@@ -68,6 +86,7 @@ esac
 
 git -C "$root" ls-files -co --exclude-standard | tar -C "$root" -czf "$archive" -I -
 doas vmctl create -b "$base" "$overlay"
+created_overlay=true
 if $use_uplink; then
 	doas vmctl start -m 1G -d "$overlay" -n uplink "$name"
 else
@@ -75,8 +94,20 @@ else
 fi
 started=true
 
-tty=$(doas vmctl status -r | awk -v name="$name" '$NF == name {print $6}')
-[[ -n $tty && -c /dev/$tty ]] || fail "cannot discover serial tty for $name"
+# vmctl start returns once vmd accepted the guest, which is before vmd has
+# published the guest's serial tty, so poll instead of reading status once.
+tty=
+waited=0
+while (( waited < 10 )); do
+	tty=$(doas vmctl status -r | awk -v name="$name" '$NF == name {print $6}')
+	if [[ -n $tty && -c /dev/$tty ]]; then
+		break
+	fi
+	sleep 1
+	waited=$((waited + 1))
+done
+[[ -n $tty && -c /dev/$tty ]] ||
+    fail "cannot discover serial tty for $name after ${waited}s"
 tty=/dev/$tty
 mkdir -p "$(dirname "$transcript")"
 : >"$transcript"
@@ -178,11 +209,13 @@ c:close()
 os.exit(0)
 LUAEOF
 
+# `set -e` would abort here before the exit status could be reported, so keep
+# the driver in a list whose failure is handled. cleanup removes the temp files.
+status=0
 doas env LUA_CPATH="$LUA_CPATH" lua5.4 "$driver" "$root/examples" "$tty" \
-    "$root_password" "$archive" "$guest_script" "$transcript"
-status=$?
-rm -f "$driver" "$guest_script"
+    "$root_password" "$archive" "$guest_script" "$transcript" || status=$?
 (( status == 0 )) || fail "guest driver failed (exit $status)"
 
 started=false
+passed=true
 print -r -- "run-pf-vm-tests: all tests passed in disposable overlay: $overlay"

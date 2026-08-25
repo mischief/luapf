@@ -242,7 +242,38 @@ function Console:login(user, password, timeout)
 	self.transcript_redact = true
 	self:say(password, 0.5)
 	self.transcript_redact = false
-	return self
+
+	-- login(1) says nothing on success, so the only proof the password
+	-- was taken is a shell answering a command. A wrong password instead
+	-- prints "Login incorrect" and hands the line back to getty, and
+	-- whatever we typed at that getty comes back echoed -- so treat a
+	-- fresh login prompt as failure too, not as a slow shell.
+	while true do
+		local remaining = deadline - os.time()
+		if remaining <= 0 then
+			break
+		end
+		local probe = "LUAPF_SHELL_" .. math.random(1, 1e9)
+		local status, out = self:exec("echo " .. probe,
+		    remaining < 8 and remaining or 8)
+
+		out = tostring(out)
+		if status == 0 and out:find(probe, 1, true) then
+			return self
+		end
+		if out:find("Login incorrect", 1, true) then
+			return nil, "login incorrect for user " .. tostring(user)
+		end
+		-- Start of a line only: login(1) greets a *successful* login
+		-- with "Last login: ...", which a plain substring test would
+		-- read as a getty prompt.
+		if out:match("^login: ") or out:match("[\r\n]login: ") then
+			return nil, "back at the login prompt after sending " ..
+			    "the password for user " .. tostring(user)
+		end
+	end
+	return nil, "logged in but no shell answered within " ..
+	    tostring(timeout or 60) .. "s"
 end
 
 -- ready(timeout) -- proves the guest is actually up and the shell will
@@ -379,11 +410,16 @@ function Console:exec(cmd, timeout)
 			return nil, table.concat(out), "console closed"
 		end
 		out[#out + 1] = c
-		seen = (seen .. c):sub(-window)
+		-- Search the carried tail joined to the whole new chunk,
+		-- then trim. Trimming first would drop the sentinel whenever
+		-- the shell's next prompt arrived in the same chunk, timing
+		-- out a command that had in fact finished.
+		local hay = seen .. c
+		seen = hay:sub(-window)
 		-- Anchored on the end of the sentinel's own line: a chunk
 		-- that split the status would otherwise report a prefix of
 		-- it and treat the command as finished early.
-		local status = seen:match(sentinel .. " (%-?%d+)[\r\n]")
+		local status = hay:match(sentinel .. " (%-?%d+)[\r\n]")
 		if status then
 			local full = table.concat(out):gsub("\r", "")
 			-- strip the echoed command line and the sentinel

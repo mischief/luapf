@@ -46,6 +46,7 @@ setdir="$stage/pub/OpenBSD/7.9/amd64"
 lock="$stage/.build-test-vm-base.lock"
 site_src="$selfdir/autoinstall"
 server_pid=
+driver=
 vm_started=false
 lock_held=false
 cleaned_up=false
@@ -71,6 +72,16 @@ cleanup() {
 		doas kill "$server_pid" >/dev/null 2>&1 || true
 		# Do not wait here: signal cleanup must never wait indefinitely for it.
 		server_pid=
+	fi
+	# A guest left running here would hold the 20G disk this script owns and
+	# block every later run, so stop it on any exit that started one.
+	if $vm_started; then
+		doas vmctl stop -f "$name" >/dev/null 2>&1 || true
+		vm_started=false
+	fi
+	if [[ -n $driver ]]; then
+		rm -f "$driver"
+		driver=
 	fi
 	if $lock_held; then
 		rmdir "$lock" >/dev/null 2>&1 || true
@@ -135,8 +146,11 @@ cmp "$release_rd" "$setdir/bsd.rd" || fail "release bsd.rd differs from staged b
 doas lua54 "$root/examples/dynamic_file_server.lua" "$port" "$stage" &
 server_pid=$!
 sleep 1
-curl -fsS "http://127.0.0.1:$port/install.conf" | grep -qv '@ADDRESS@' ||
-	fail "dynamic file server did not render install.conf"
+# Match on the whole served body, not per line: only 2 of install.conf's 24
+# lines carry the token, so any line-at-a-time test passes either way.
+rendered=$(curl -fsS "http://127.0.0.1:$port/install.conf") ||
+	fail "dynamic file server did not serve install.conf"
+[[ $rendered != *@ADDRESS@* ]] || fail "dynamic file server did not render install.conf"
 curl -fsSI "http://127.0.0.1:$port/pub/OpenBSD/7.9/amd64/SHA256.sig" >/dev/null
 
 # A fresh qcow2 is the base image; the guest can alter only this disk.
@@ -275,8 +289,11 @@ c:close()
 os.exit(0)
 LUAEOF
 
-doas env LUA_CPATH="$LUA_CPATH" lua5.4 "$driver" "$root/examples" "$tty" "$root_password" "$transcript" installer
-status=$?
+# -e would abort before the diagnostic below, so keep the failure in the
+# OR list and report the guest's own exit status.
+status=0
+doas env LUA_CPATH="$LUA_CPATH" lua5.4 "$driver" "$root/examples" "$tty" "$root_password" "$transcript" installer ||
+	status=$?
 (( status == 0 )) || fail "installer driver failed (exit $status)"
 
 # In VMD, the installed system's reboot request powers down and terminates
@@ -287,6 +304,7 @@ while doas vmctl status -r | awk '{print $NF}' | grep -qx "$name"; do
 	(( SECONDS < deadline )) || fail "timed out waiting for installer VM poweroff"
 	sleep 5
 done
+vm_started=false
 
 # Give vmd a short settling interval after the VM disappears from status;
 # the guest has already performed its orderly halt, but this avoids racing
@@ -301,9 +319,9 @@ tty=$(doas vmctl status -r | awk -v name="$name" '$NF == name {print $6}')
 tty=/dev/$tty
 
 # This is a new VM instance and therefore a new console connection.
-doas env LUA_CPATH="$LUA_CPATH" lua5.4 "$driver" "$root/examples" "$tty" "$root_password" "$transcript" postinstall
-status=$?
-rm -f "$driver"
+status=0
+doas env LUA_CPATH="$LUA_CPATH" lua5.4 "$driver" "$root/examples" "$tty" "$root_password" "$transcript" postinstall ||
+	status=$?
 (( status == 0 )) || fail "guest driver failed (exit $status)"
 
 # vmctl returns a non-running VM only after the halt -p above completes an
@@ -313,6 +331,7 @@ while doas vmctl status -r | awk '{print $NF}' | grep -qx "$name"; do
 	(( SECONDS < deadline )) || fail "timed out waiting for guest poweroff"
 	sleep 5
 done
+vm_started=false
 
 sleep 2
 
