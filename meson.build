@@ -11,6 +11,8 @@ native_cc = meson.get_compiler('c', native: true)
 pkgconfig = import('pkgconfig')
 
 # Extra warnings, applied only where the compiler knows them.
+which_lua = get_option('lua')
+
 hardening_args = [
   '-Wnull-dereference',
   '-Warray-bounds',
@@ -30,7 +32,11 @@ hardening_args = [
   '-Wshift-overflow',
   '-Wreturn-stack-address',
   '-Wuseless-cast',
-  '-Wframe-larger-than=2048',
+  # luaL_Buffer sits on the stack and is eight times larger in 5.3 than in
+  # 5.4, so the budget is a property of the lua headers rather than of any
+  # code here. Every frame over it holds one of those buffers.
+  which_lua == 'lua5.3' ? '-Wframe-larger-than=10240' :
+    '-Wframe-larger-than=2048',
   '-fno-omit-frame-pointer',
   '-Wno-unused-parameter',
 ]
@@ -65,15 +71,8 @@ foreach a : hardening_args
   endif
 endforeach
 
-which_lua = get_option('lua')
-
-if which_lua == 'luajit'
-  install_cmod = get_option('prefix') / 'lib/lua/5.1'
-  install_mod = get_option('prefix') / 'share/lua/5.1'
-else
-  install_cmod = get_option('prefix') / 'lib/lua/' + which_lua.replace('lua', '')
-  install_mod = get_option('prefix') / 'share/lua/' + which_lua.replace('lua', '')
-endif
+install_cmod = get_option('prefix') / 'lib/lua/' + which_lua.replace('lua', '')
+install_mod = get_option('prefix') / 'share/lua/' + which_lua.replace('lua', '')
 
 
 cmod_override = get_option('lua-module-directory')
@@ -127,13 +126,20 @@ lua_bin = find_program(dep_name)
 # be the target lua's headers and library under a cross build. dep_name
 # is already spelled for build_machine, so the two agree whenever the
 # build is native, which is the case everyone actually configures.
-serialutil_lua_dep = dependency(dep_name, native: true)
+# Not dep_name: this is a host tool that drives a test guest over a serial
+# line, so the lua it links is the one running the driver, not whatever
+# -Dlua aims the binding at. It calls lua_newuserdatauv, so it wants 5.4
+# even when the binding is built for 5.3.
+serialutil_lua_dep = dependency('lua5.4', 'lua54', native: true,
+  required: false)
 
-serialutil = shared_module('serialutil', 'examples/serialutil/serialutil.c',
-  dependencies: [serialutil_lua_dep],
-  native: true,
-  name_prefix: '',
-)
+if serialutil_lua_dep.found()
+  serialutil = shared_module('serialutil', 'examples/serialutil/serialutil.c',
+    dependencies: [serialutil_lua_dep],
+    native: true,
+    name_prefix: '',
+  )
+endif
 
 # One LUA_CPATH entry reaches every native module this project builds
 # (pf.so, serialutil.so, and whatever else lands in the build root),
