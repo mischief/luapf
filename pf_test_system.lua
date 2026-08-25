@@ -13,23 +13,24 @@ local function sh(cmd)
 	return out
 end
 
--- The Counters block of `pfctl -s info`. Without -v that block is last, so
--- nothing else can leak into it.
-local function pfctlcounters()
-	local t, inside = {}, false
-	for line in sh("pfctl -s info"):gmatch("[^\n]+") do
-		if line:match("^Counters") then
-			inside = true
-		elseif line:match("^%S") then
-			inside = false
-		elseif inside then
-			local name, value = line:match("^%s+(%S+)%s+(%d+)")
+-- `pfctl -s info -v` in blocks: a heading in column one, then rows of an
+-- indented name, its value and sometimes a rate. A name may hold single
+-- spaces ("max states per rule"), so the value is whatever follows the
+-- first run of two or more.
+local function pfctlinfo()
+	local blocks, rows = {}, nil
+	for line in sh("pfctl -s info -v"):gmatch("[^\n]+") do
+		if line:match("^%S") then
+			rows = {}
+			blocks[line:match("^(%S.-)%s%s+") or line] = rows
+		elseif rows then
+			local name, value = line:match("^%s+(.-)%s%s+(%d+)")
 			if name then
-				t[name] = tonumber(value)
+				rows[name] = tonumber(value)
 			end
 		end
 	end
-	return t
+	return blocks
 end
 
 local function pfctllimits()
@@ -79,9 +80,37 @@ local reasons = {"match", "bad-offset", "fragment", "short", "normalize",
     "state-mismatch", "state-insert", "state-limit", "src-limit", "synproxy",
     "translate", "no-route"}
 
-local before = pfctlcounters()
+-- LCNT_NAMES, in kernel order, and the three names each of the state,
+-- source node and fragment tables carries. pfctl prints all of these under
+-- the same headings.
+local lreasons = {"max states per rule", "max-src-states", "max-src-nodes",
+    "max-src-conn", "max-src-conn-rate", "overload table insertion",
+    "overload flush states", "synfloods detected", "syncookies sent",
+    "syncookies validated"}
+local tablecounters = {"searches", "inserts", "removals"}
+
+local before = pfctlinfo()
 local status = h:status()
-local after = pfctlcounters()
+local after = pfctlinfo()
+
+-- Every one of these only rises, so the binding's number has to sit where
+-- pfctl saw it go.
+local function betweenpfctl(t, block, names, label)
+	assert(count(t) == #names, label .. " does not hold exactly " ..
+	    #names .. " entries")
+	for _, name in ipairs(names) do
+		local value = t[name]
+		assert(type(value) == "number" and value >= 0,
+		    label .. " has no " .. name)
+		local lo = before[block] and before[block][name]
+		local hi = after[block] and after[block][name]
+		if lo and hi then
+			assert(value >= lo and value <= hi, label .. "." ..
+			    name .. ": binding says " .. value ..
+			    ", pfctl says " .. lo .. ".." .. hi)
+		end
+	end
+end
 
 assert(type(status) == "table")
 assert(type(status.running) == "boolean")
@@ -99,23 +128,60 @@ assert(type(status.syncookies_mode) == "number")
 assert(type(status.ifname) == "string")
 assert(type(status.checksum) == "string" and status.checksum:match("^%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x$"))
 
-assert(count(status.counters) == #reasons,
-    "status.counters does not hold exactly PFRES_MAX entries")
-for _, name in ipairs(reasons) do
-	local value = status.counters[name]
-	assert(type(value) == "number" and value >= 0,
-	    "missing or negative counter " .. name)
-	if before[name] and after[name] then
-		assert(value >= before[name] and value <= after[name],
-		    name .. ": binding says " .. value .. ", pfctl says " ..
-		    before[name] .. ".." .. after[name])
-	end
+assert(type(status.fragments) == "number" and status.fragments >= 0)
+
+betweenpfctl(status.counters, "Counters", reasons, "status.counters")
+betweenpfctl(status.lcounters, "Limit Counters", lreasons, "status.lcounters")
+-- Three arrays of three, one per table pf keeps, each behind its own
+-- heading. Reading the wrong array would still type check, so every one is
+-- pinned to the block pfctl prints it under.
+betweenpfctl(status.fcounters, "State Table", tablecounters,
+    "status.fcounters")
+betweenpfctl(status.scounters, "Source Tracking Table", tablecounters,
+    "status.scounters")
+betweenpfctl(status.ncounters, "Fragments", tablecounters,
+    "status.ncounters")
+
+for _, name in ipairs({"fcounters", "scounters", "ncounters"}) do
+	local t = status[name]
+	assert(t.searches >= t.inserts, name ..
+	    " reports more inserts than searches")
+	assert(t.inserts >= t.removals, name ..
+	    " reports more removals than inserts")
 end
-if next(before) then
-	for name in pairs(before) do
+
+if next(before["Counters"] or {}) then
+	for name in pairs(before["Counters"]) do
 		assert(status.counters[name], "pfctl reports an unbound " ..
 		    "counter: " .. name)
 	end
+end
+if next(before["Limit Counters"] or {}) then
+	for name in pairs(before["Limit Counters"]) do
+		assert(status.lcounters[name], "pfctl reports an unbound " ..
+		    "limit counter: " .. name)
+	end
+end
+
+assert(#status.syncookies_inflight == 2,
+    "syncookies_inflight is not the pair the kernel keeps")
+for i = 1, 2 do
+	assert(type(status.syncookies_inflight[i]) == "number" and
+	    status.syncookies_inflight[i] >= 0)
+end
+
+-- The watermarks come from their own ioctl and do not move on their own,
+-- so pfctl and the binding have to agree exactly. pfctl calls them start
+-- and end.
+local wats = status.syncookies_watermarks
+assert(count(wats) == 2)
+assert(type(wats.hiwat) == "number" and type(wats.lowat) == "number")
+assert(wats.hiwat >= wats.lowat, "the syncookie window is inverted")
+local refwats = before["Adaptive Syncookies Watermarks"]
+if refwats and refwats.start then
+	assert(wats.hiwat == refwats.start and wats.lowat == refwats["end"],
+	    "watermarks: binding says " .. wats.hiwat .. "/" .. wats.lowat ..
+	    ", pfctl says " .. refwats.start .. "/" .. refwats["end"])
 end
 
 for _, group in ipairs({status.bcounters.v4, status.bcounters.v6}) do
@@ -198,6 +264,7 @@ for _, i in ipairs(ifs) do
 	assert(type(i.name) == "string" and #i.name > 0)
 	assert(#i.name < 16, "interface name is not bounded by IFNAMSIZ")
 	assert(type(i.skip) == "boolean")
+	assert(type(i.any) == "boolean")
 	for _, field in ipairs({"states", "rules", "routes", "srcnodes",
 	    "cleared"}) do
 		assert(type(i[field]) == "number" and i[field] >= 0,
@@ -269,15 +336,28 @@ local nodes = h:srcnodes()
 assert(type(nodes) == "table")
 assert(#nodes <= status.src_nodes + 8,
     "more source nodes than the status table admits to")
+local srcnodetypes = {none = true, nat = true, rdr = true, route = true,
+    unknown = true}
 for _, n in ipairs(nodes) do
 	assert(type(n.address) == "string" and #n.address > 0)
-	assert(type(n.translation) == "string" and #n.translation > 0)
+	-- Both are absent rather than zero where pfctl prints nothing: an
+	-- untranslated node has no address to name, and a node from an
+	-- unnumbered rule has no rule number.
+	assert(n.translation == nil or
+	    (type(n.translation) == "string" and #n.translation > 0))
+	assert(n.rule == nil or (type(n.rule) == "number" and n.rule >= 0))
+	assert(srcnodetypes[n.type],
+	    "source node type is not one the binding names: " ..
+	    tostring(n.type))
 	for _, field in ipairs({"states", "connections", "packets_in",
-	    "packets_out", "bytes_in", "bytes_out", "creation", "expire",
-	    "rule"}) do
+	    "packets_out", "bytes_in", "bytes_out", "creation", "expire"}) do
 		assert(type(n[field]) == "number" and n[field] >= 0,
 		    "source node has no " .. field)
 	end
+	assert(count(n.conn_rate) == 2)
+	assert(type(n.conn_rate.count) == "number" and n.conn_rate.count >= 0)
+	assert(type(n.conn_rate.seconds) == "number" and
+	    n.conn_rate.seconds >= 0)
 	assert(n.bytes_in >= n.packets_in)
 	assert(n.bytes_out >= n.packets_out)
 end
@@ -324,13 +404,16 @@ if not marker then
 end
 marker:close()
 
--- Source nodes need a rule that tracks them. The tracking rule goes last
--- because PF takes the last match.
+-- Source nodes need a rule that tracks them. The tracking rules go last
+-- because PF takes the last match. The second one holds a single state per
+-- source so that a handful of connections at once trips a limit counter.
 local conf = assert(io.open("/tmp/pf_test_system.conf", "w"))
 conf:write([[
 pass log
 pass in log on lo0 inet proto tcp to 127.0.0.1 port 31341 \
     keep state (source-track rule, max-src-states 100)
+pass in log on lo0 inet proto tcp to 127.0.0.1 port 31342 \
+    keep state (source-track rule, max-src-states 1)
 ]])
 conf:close()
 assert(sh("pfctl -f /tmp/pf_test_system.conf") == "")
@@ -338,11 +421,20 @@ assert(sh("pfctl -f /tmp/pf_test_system.conf") == "")
 h:clearsrcnodes()
 assert(#h:srcnodes() == 0, "source nodes survived clearsrcnodes")
 
+local scbefore = h:status().scounters
+
 sh("nc -l 127.0.0.1 31341 </dev/null >/dev/null & sleep 1; " ..
     "print x | nc -N -w 2 127.0.0.1 31341; sleep 1")
 
 local tracked = h:srcnodes()
 assert(#tracked > 0, "the tracking rule produced no source node")
+
+-- Inserting that node is what the source node counters count.
+local scafter = h:status().scounters
+assert(scafter.inserts > scbefore.inserts,
+    "a source node appeared without scounters.inserts moving")
+assert(scafter.searches > scbefore.searches,
+    "a source node was inserted without scounters.searches moving")
 
 local node
 for _, n in ipairs(tracked) do
@@ -351,12 +443,24 @@ for _, n in ipairs(tracked) do
 	end
 end
 assert(node, "no source node for the loopback client")
-assert(type(node.translation) == "string")
+-- source-track rule asks for tracking alone, so the node carries no
+-- translation and pfctl prints none either.
+assert(node.type == "none", "a plain source-track node reports type " ..
+    tostring(node.type))
+assert(node.translation == nil,
+    "an untranslated node reports a translation of " ..
+    tostring(node.translation))
 assert(node.states >= 0 and node.connections >= 0)
 assert(node.creation >= 0)
--- pfctl prints rule.nr only when it is not -1; the binding hands the raw
--- u_int32_t across, so an untracked rule reads as UINT_MAX here.
-assert(node.rule >= 0)
+-- The rule is a numbered one in the loaded ruleset, so unlike a node from
+-- the default rule this one names it.
+assert(type(node.rule) == "number" and node.rule < 4294967295,
+    "the tracking rule's node reports rule " .. tostring(node.rule))
+assert(node.conn_rate.seconds >= 0)
+
+-- pfctl walks the same nodes, so it has to name this address too.
+assert(sh("pfctl -vvs Sources"):find("127.0.0.1", 1, true),
+    "pfctl does not list the node the binding found")
 
 local status2 = h:status()
 assert(status2.src_nodes >= #tracked,
@@ -396,6 +500,65 @@ assert(#h:srcnodes() > 0, "the tracking rule stopped producing nodes")
 h:clearsrcnodes()
 assert(#h:srcnodes() == 0, "source nodes survived clearsrcnodes")
 assert(h:status().src_nodes == 0)
+
+-- Limit counters. The port 31342 rule allows one state per source, so
+-- several connections at once leave the extras blocked: pf bumps
+-- LCNT_SRCSTATES for each and counts the drop as src-limit. Nothing else
+-- on this guest touches either number.
+local lbefore = h:status()
+sh("nc -l 127.0.0.1 31342 >/dev/null 2>&1 & sleep 1; " ..
+    "for i in 1 2 3 4 5 6; do (sleep 3 | nc -w 3 127.0.0.1 31342 " ..
+    ">/dev/null 2>&1 &); done; sleep 5")
+
+local linfo = pfctlinfo()
+local lafter = h:status()
+assert(lafter.lcounters["max-src-states"] >
+    lbefore.lcounters["max-src-states"],
+    "states past max-src-states did not move the limit counter")
+assert(lafter.counters["src-limit"] > lbefore.counters["src-limit"],
+    "a source limit was hit without src-limit counting the drop")
+-- pfctl read the same number between the two calls, so it can only sit
+-- where those two leave it.
+local refl = linfo["Limit Counters"]
+if refl and refl["max-src-states"] then
+	assert(refl["max-src-states"] >= lbefore.lcounters["max-src-states"] and
+	    refl["max-src-states"] <= lafter.lcounters["max-src-states"],
+	    "pfctl says max-src-states is " .. refl["max-src-states"] ..
+	    ", the binding says " .. lbefore.lcounters["max-src-states"] ..
+	    ".." .. lafter.lcounters["max-src-states"])
+end
+
+-- A translated node. sticky-address is what makes pf keep one, and its
+-- raddr is the address the rule mapped to, which is what pfctl prints
+-- after nat-to. Nothing listens on 127.0.0.9; the node is made when the
+-- first packet is translated, not when the handshake finishes.
+local natconf = assert(io.open("/tmp/pf_test_system.conf", "w"))
+natconf:write([[
+pass log
+pass out log on lo0 inet proto tcp from 127.0.0.1 to 127.0.0.9 port 31343 \
+    nat-to 127.0.0.2 sticky-address
+]])
+natconf:close()
+assert(sh("pfctl -f /tmp/pf_test_system.conf") == "")
+
+h:clearsrcnodes()
+sh("print x | nc -N -w 2 127.0.0.9 31343; sleep 1")
+
+local nat
+for _, n in ipairs(h:srcnodes()) do
+	if n.type == "nat" then
+		nat = n
+	end
+end
+assert(nat, "nat-to sticky-address produced no translated source node")
+assert(nat.address == "127.0.0.1",
+    "the translated node tracks " .. nat.address)
+assert(nat.translation == "127.0.0.2",
+    "the translated node maps to " .. tostring(nat.translation))
+-- pfctl labels exactly this node nat-to, which is where the type comes
+-- from.
+assert(sh("pfctl -vvs Sources"):find("nat-to", 1, true),
+    "pfctl does not call the node a nat-to")
 
 os.remove("/tmp/pf_test_system.conf")
 sh("printf '%s\\n' 'pass log' | pfctl -f -")

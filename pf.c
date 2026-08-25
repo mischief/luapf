@@ -19,7 +19,32 @@
 #include "pf.h"
 #include "banned.h"
 
-static const char *pfcounternames[] = PFRES_NAMES;
+static const char *const pfcounternames[] = PFRES_NAMES;
+static const char *const pflimitcounternames[] = LCNT_NAMES;
+
+/*
+ * pfvar.h names the indices of these three arrays but ships no names macro
+ * beside them, so every label is tied to the kernel's own index macro. pfctl
+ * builds all three of its rows from the state table names, so take each set
+ * from the macros of its own array instead.
+ */
+static const char *const pfstatecounternames[FCNT_MAX] = {
+    [FCNT_STATE_SEARCH] = "searches",
+    [FCNT_STATE_INSERT] = "inserts",
+    [FCNT_STATE_REMOVALS] = "removals",
+};
+
+static const char *const pfsrcnodecounternames[SCNT_MAX] = {
+    [SCNT_SRC_NODE_SEARCH] = "searches",
+    [SCNT_SRC_NODE_INSERT] = "inserts",
+    [SCNT_SRC_NODE_REMOVALS] = "removals",
+};
+
+static const char *const pffragmentcounternames[NCNT_MAX] = {
+    [NCNT_FRAG_SEARCH] = "searches",
+    [NCNT_FRAG_INSERT] = "inserts",
+    [NCNT_FRAG_REMOVALS] = "removals",
+};
 
 /***
 Read and control the pf packet filter.
@@ -92,30 +117,62 @@ pfstop(lua_State *L)
 	return 0;
 }
 
+/* Every counter array in struct pf_status is read the same way. */
+static void
+pushcounters(lua_State *L, const char *field, const char *const *names,
+             const u_int64_t *values, size_t n)
+{
+	lua_newtable(L);
+
+	for (size_t i = 0; i < n; i++) {
+		lua_pushinteger(L, (lua_Integer)values[i]);
+		lua_setfield(L, -2, names[i]);
+	}
+
+	lua_setfield(L, -2, field);
+}
+
 /***
 Read the global status.
 
 The result holds running, since, states, states_halfopen, src_nodes,
-debug, hostid, reass, syncookies_active, syncookies_mode, ifname and
-checksum, plus counters, bcounters and pcounters tables.
+fragments, debug, hostid, reass, syncookies_active, syncookies_mode,
+ifname and checksum, plus the syncookies_inflight pair, the
+syncookies_watermarks table and the counters, lcounters, fcounters,
+scounters, ncounters, bcounters and pcounters tables.
+
+counters is keyed by drop reason, lcounters by limit, and fcounters,
+scounters and ncounters each hold searches, inserts and removals for the
+state table, the source node table and the fragment cache.
 
 since is not a wall clock time: it counts from when the machine booted,
 the way pfctl reads it to work out how long PF has been running. hostid
 is byte swapped into host order, so it reads as pfctl prints it.
+syncookies_watermarks holds the adaptive syncookie state counts pfctl
+prints as start and end.
 @function pf:status
 @treturn table status
-@raise if the ioctl fails
+@raise if either ioctl fails
 */
 static int
 pfstatus(lua_State *L)
 {
 	struct luapf *pf = checkpf(L);
 	struct pf_status st;
+	struct pfioc_synflwats wats;
 	char hash[PF_MD5_DIGEST_LENGTH * 2 + 1];
 	const uint8_t *c;
 
 	if (ioctl(pf->fd, DIOCGETSTATUS, &st) < 0)
 		luaL_error(L, "DIOCGETSTATUS: %s", strerror(errno));
+
+	/* The watermarks live behind their own ioctl, but they describe the
+	 * same syncookie state the status table counts, so report them
+	 * together. A read-only descriptor answers this one too. */
+	memset(&wats, 0, sizeof(wats));
+
+	if (ioctl(pf->fd, DIOCGETSYNFLWATS, &wats) < 0)
+		luaL_error(L, "DIOCGETSYNFLWATS: %s", strerror(errno));
 
 	lua_newtable(L);
 
@@ -131,6 +188,8 @@ pfstatus(lua_State *L)
 	lua_setfield(L, -2, "states_halfopen");
 	lua_pushinteger(L, (lua_Integer)st.src_nodes);
 	lua_setfield(L, -2, "src_nodes");
+	lua_pushinteger(L, (lua_Integer)st.fragments);
+	lua_setfield(L, -2, "fragments");
 	lua_pushinteger(L, (lua_Integer)st.debug);
 	lua_setfield(L, -2, "debug");
 	/* The kernel keeps this in network order; pfctl prints it swapped,
@@ -143,6 +202,23 @@ pfstatus(lua_State *L)
 	lua_setfield(L, -2, "syncookies_active");
 	lua_pushinteger(L, (lua_Integer)st.syncookies_mode);
 	lua_setfield(L, -2, "syncookies_mode");
+
+	/* Two rotating buckets of unACKed cookies, not two named numbers, so
+	 * hand them over as the array the kernel keeps. */
+	lua_newtable(L);
+	for (int i = 0; i < 2; i++) {
+		lua_pushinteger(L, (lua_Integer)st.syncookies_inflight[i]);
+		lua_rawseti(L, -2, i + 1);
+	}
+	lua_setfield(L, -2, "syncookies_inflight");
+
+	lua_newtable(L);
+	lua_pushinteger(L, (lua_Integer)wats.hiwat);
+	lua_setfield(L, -2, "hiwat");
+	lua_pushinteger(L, (lua_Integer)wats.lowat);
+	lua_setfield(L, -2, "lowat");
+	lua_setfield(L, -2, "syncookies_watermarks");
+
 	lua_pushstring(L, st.ifname);
 	lua_setfield(L, -2, "ifname");
 
@@ -157,12 +233,15 @@ pfstatus(lua_State *L)
 	lua_pushstring(L, hash);
 	lua_setfield(L, -2, "checksum");
 
-	lua_newtable(L);
-	for (int i = 0; i < PFRES_MAX; i++) {
-		lua_pushinteger(L, (lua_Integer)st.counters[i]);
-		lua_setfield(L, -2, pfcounternames[i]);
-	}
-	lua_setfield(L, -2, "counters");
+	pushcounters(L, "counters", pfcounternames, st.counters, PFRES_MAX);
+	pushcounters(L, "lcounters", pflimitcounternames, st.lcounters,
+	             LCNT_MAX);
+	pushcounters(L, "fcounters", pfstatecounternames, st.fcounters,
+	             FCNT_MAX);
+	pushcounters(L, "scounters", pfsrcnodecounternames, st.scounters,
+	             SCNT_MAX);
+	pushcounters(L, "ncounters", pffragmentcounternames, st.ncounters,
+	             NCNT_MAX);
 
 	lua_newtable(L);
 
@@ -184,6 +263,10 @@ pfstatus(lua_State *L)
 
 	lua_newtable(L);
 
+	/* pcounters carries a third slot per direction for PF_SCRUB, which
+	 * the kernel never writes: it counts every packet as passed or
+	 * dropped. Reporting a number that is always zero would only invite
+	 * someone to look for meaning in it. */
 	lua_newtable(L);
 	lua_pushinteger(L, (lua_Integer)st.pcounters[0][0][PF_PASS]);
 	lua_setfield(L, -2, "packets_in_passed");

@@ -158,9 +158,12 @@ pushifcounters(lua_State *L, const struct pfi_kif *k)
 /***
 Read the per-interface counters, the same numbers as pfctl -vvsI.
 
-Each entry holds name, skip, states, rules, routes, srcnodes, cleared and
-eight counter pairs named like in4_pass_packets and out6_block_bytes. The
-filter matches an interface or a group, not a prefix.
+Each entry holds name, skip, any, states, rules, routes, srcnodes, cleared
+and eight counter pairs named like in4_pass_packets and out6_block_bytes.
+skip and any are the two flags pf keeps per interface: skip is set by
+pfctl -F Interfaces or a set skip rule, any marks the group that matches
+every non-loopback interface. The filter matches an interface or a group,
+not a prefix.
 @function pf:interfaces
 @string[opt] filter interface or group name
 @treturn table array of interface tables
@@ -221,6 +224,8 @@ pfinterfaces(lua_State *L)
 		lua_setfield(L, -2, "name");
 		lua_pushboolean(L, (k->pfik_flags & PFI_IFLAG_SKIP) != 0);
 		lua_setfield(L, -2, "skip");
+		lua_pushboolean(L, (k->pfik_flags & PFI_IFLAG_ANY) != 0);
+		lua_setfield(L, -2, "any");
 		lua_pushinteger(L, (lua_Integer)k->pfik_states);
 		lua_setfield(L, -2, "states");
 		lua_pushinteger(L, (lua_Integer)k->pfik_rules);
@@ -251,12 +256,32 @@ pushaddress(lua_State *L, sa_family_t af, const struct pf_addr *a)
 	lua_pushstring(L, s);
 }
 
+/*
+ * PF_SN_NONE has no matching pfctl label because pfctl never prints an
+ * untranslated node's type at all.
+ */
+static const char *const srcnodetypes[PF_SN_MAX] = {
+    [PF_SN_NONE] = "none",
+    [PF_SN_NAT] = "nat",
+    [PF_SN_RDR] = "rdr",
+    [PF_SN_ROUTE] = "route",
+};
+
 /***
 Read the source tracking nodes.
 
 Nodes exist only for rules that track them, such as an overload rule or a
-sticky pool. Each entry holds address, translation, states, connections,
-packets_in, packets_out, bytes_in, bytes_out, creation, expire and rule.
+sticky pool. Each entry holds address, type, states, connections,
+packets_in, packets_out, bytes_in, bytes_out, creation, expire and
+conn_rate, which holds the count and seconds of the connection rate pfctl
+prints.
+
+translation is set only where the node carries one, and rule only where
+the node came from a numbered rule, so both read as nil where pfctl
+prints nothing. type is none, nat, rdr or route, and unknown if the kernel
+grows another; nat, rdr and route are what pfctl prints as nat-to, rdr-to
+and route-to. There is no interface: the kernel clears the node's kif
+pointer on its way out, and pfctl does not print one either.
 @function pf:srcnodes
 @treturn table array of node tables
 @raise if the ioctl fails
@@ -266,8 +291,8 @@ pfsrcnodes(lua_State *L)
 {
 	struct luapf *pf = luaL_checkudata(L, 1, PF_MT);
 	struct pfioc_src_nodes *psn;
-	const struct pf_src_node *nodes;
-	size_t count;
+	const struct pf_src_node *nodes = NULL;
+	size_t len, count = 0;
 
 	psn = lua_newuserdata(L, sizeof(*psn));
 	memset(psn, 0, sizeof(*psn));
@@ -275,26 +300,52 @@ pfsrcnodes(lua_State *L)
 	if (ioctl(pf->fd, DIOCGETSRCNODES, psn) < 0)
 		luaL_error(L, "DIOCGETSRCNODES: %s", strerror(errno));
 
-	psn->psn_buf = lua_newuserdata(L, psn->psn_len);
-	memset(psn->psn_buf, 0, psn->psn_len);
+	/*
+	 * The kernel stops at psn_len and reports no truncation, so a node
+	 * that appeared since the sizing call would be dropped without a
+	 * word. A buffer the answer filled exactly may have been cut short,
+	 * so double it and ask again until it is not.
+	 */
+	for (len = psn->psn_len; len > 0; len *= 2) {
+		psn->psn_len = len;
+		psn->psn_buf = lua_newuserdata(L, len);
+		memset(psn->psn_buf, 0, len);
 
-	if (ioctl(pf->fd, DIOCGETSRCNODES, psn) < 0)
-		luaL_error(L, "DIOCGETSRCNODES: %s", strerror(errno));
+		if (ioctl(pf->fd, DIOCGETSRCNODES, psn) < 0)
+			luaL_error(L, "DIOCGETSRCNODES: %s", strerror(errno));
 
-	nodes = psn->psn_src_nodes;
-	count = psn->psn_len / sizeof(struct pf_src_node);
+		if (psn->psn_len < len) {
+			nodes = psn->psn_src_nodes;
+			count = psn->psn_len / sizeof(struct pf_src_node);
+			break;
+		}
+
+		lua_pop(L, 1);
+	}
 
 	lua_newtable(L);
 
 	for (size_t i = 0; i < count; i++) {
 		const struct pf_src_node *n = &nodes[i];
+		sa_family_t naf = n->naf != 0 ? n->naf : n->af;
 
 		lua_newtable(L);
 
 		pushaddress(L, n->af, &n->addr);
 		lua_setfield(L, -2, "address");
-		pushaddress(L, n->naf != 0 ? n->naf : n->af, &n->raddr);
-		lua_setfield(L, -2, "translation");
+
+		/* An all zero raddr is not the address 0.0.0.0, it is the
+		 * absence of a translation, which is why pfctl prints
+		 * nothing for it. */
+		if (!PF_AZERO(&n->raddr, naf)) {
+			pushaddress(L, naf, &n->raddr);
+			lua_setfield(L, -2, "translation");
+		}
+
+		lua_pushstring(L, n->type < PF_SN_MAX ? srcnodetypes[n->type]
+		                                      : "unknown");
+		lua_setfield(L, -2, "type");
+
 		lua_pushinteger(L, (lua_Integer)n->states);
 		lua_setfield(L, -2, "states");
 		lua_pushinteger(L, (lua_Integer)n->conn);
@@ -311,8 +362,20 @@ pfsrcnodes(lua_State *L)
 		lua_setfield(L, -2, "creation");
 		lua_pushinteger(L, (lua_Integer)n->expire);
 		lua_setfield(L, -2, "expire");
-		lua_pushinteger(L, (lua_Integer)n->rule.nr);
-		lua_setfield(L, -2, "rule");
+
+		lua_newtable(L);
+		lua_pushinteger(L, (lua_Integer)n->conn_rate.count);
+		lua_setfield(L, -2, "count");
+		lua_pushinteger(L, (lua_Integer)n->conn_rate.seconds);
+		lua_setfield(L, -2, "seconds");
+		lua_setfield(L, -2, "conn_rate");
+
+		/* The kernel hands "no rule" over as -1 in a u_int32_t, and
+		 * a rule numbered four billion helps nobody. */
+		if (n->rule.nr != (u_int32_t)-1) {
+			lua_pushinteger(L, (lua_Integer)n->rule.nr);
+			lua_setfield(L, -2, "rule");
+		}
 
 		lua_rawseti(L, -2, (lua_Integer)i + 1);
 	}
