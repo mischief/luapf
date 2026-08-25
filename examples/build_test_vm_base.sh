@@ -288,6 +288,11 @@ while doas vmctl status -r | awk '{print $NF}' | grep -qx "$name"; do
 	sleep 5
 done
 
+# Give vmd a short settling interval after the VM disappears from status;
+# the guest has already performed its orderly halt, but this avoids racing
+# teardown of the VMD process with the next disk boot.
+sleep 2
+
 doas vmctl start -m 1G -B disk -d "$disk" -L "$name"
 vm_started=true
 sleep 1
@@ -308,5 +313,7 @@ while doas vmctl status -r | awk '{print $NF}' | grep -qx "$name"; do
 	(( SECONDS < deadline )) || fail "timed out waiting for guest poweroff"
 	sleep 5
 done
+
+sleep 2
 
 echo "build-test-vm-base: guest powered off; base image is ready: $disk"
