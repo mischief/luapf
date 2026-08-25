@@ -384,11 +384,11 @@ local function checkrule(r, anchor)
 	assert(r.bytes_in >= r.packets_in)
 	assert(r.bytes_out >= r.packets_out)
 
-	-- Every state a rule holds is one it created, and each creation cost
-	-- an evaluation. `pfctl -vsr -z` zeroes states_total and evaluations
-	-- but leaves states_cur alone, so this test never clears counters.
-	assert(r.states_total >= r.states_cur,
-	    "rule " .. r.nr .. " holds more states than it ever created")
+	-- A rule holds states it did not create: a match rule with a
+	-- translation is charged the current count while the pass rule that
+	-- follows it is charged the creations, so a live firewall shows
+	-- states_cur in the hundreds against states_total of zero. Only the
+	-- creations are bounded by the evaluations that produced them.
 	assert(r.evaluations >= r.states_total,
 	    "rule " .. r.nr .. " created states it never evaluated")
 

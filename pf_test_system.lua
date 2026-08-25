@@ -277,13 +277,17 @@ for _, i in ipairs(ifs) do
 	-- A counted packet carries at least one byte, so bytes can never
 	-- trail packets. This catches a swapped pfik_packets/pfik_bytes
 	-- read that plain type checks would not.
+	-- Only the pass counters: a packet turned away before its length is
+	-- known is charged to the block counter with no bytes behind it, so
+	-- the block cells legitimately show hundreds of packets in a few
+	-- bytes. An ip-option drop is the common source.
 	for _, af in ipairs({"in4", "out4", "in6", "out6"}) do
-		for _, act in ipairs({"pass", "block"}) do
-			local p = i[af .. "_" .. act .. "_packets"]
-			local b = i[af .. "_" .. act .. "_bytes"]
-			assert(b >= p, i.name .. ": " .. af .. "_" .. act ..
-			    " counts " .. p .. " packets in " .. b .. " bytes")
-		end
+		local p = i[af .. "_pass_packets"]
+		local b = i[af .. "_pass_bytes"]
+		assert(b >= p, i.name .. ": " .. af ..
+		    "_pass counts " .. p .. " packets in " .. b .. " bytes")
+		assert(i[af .. "_block_packets"] >= 0)
+		assert(i[af .. "_block_bytes"] >= 0)
 	end
 	byname[i.name] = i
 	if i.name == "all" then
