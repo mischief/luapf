@@ -169,6 +169,129 @@ not a prefix.
 @treturn table array of interface tables
 @raise if the ioctl fails
 */
+/*
+ * These entries are lua tables rather than userdata, which is no barrier
+ * to a metamethod: a table takes a metatable the same way. Each renders
+ * what pfctl prints for it, so printing one is worth doing.
+ */
+
+/*
+ * A metamethod is reachable through getmetatable, so it can be called
+ * with anything at all. Accept only a table this module gave this
+ * metatable, the way luaL_checkudata does for userdata.
+ */
+static void
+checkentry(lua_State *L, const char *meta, const char *what)
+{
+	if (!lua_getmetatable(L, 1)) {
+		luaL_error(L, "expected %s", what);
+		return;
+	}
+	luaL_getmetatable(L, meta);
+	if (!lua_rawequal(L, -1, -2))
+		luaL_error(L, "expected %s", what);
+	lua_pop(L, 2);
+}
+
+/* Its fields stay writable, so a required one is still checked. */
+static const char *
+entrystring(lua_State *L, const char *field)
+{
+	const char *str;
+
+	lua_getfield(L, 1, field);
+	str = lua_tostring(L, -1);
+	if (str == NULL)
+		luaL_error(L, "%s is not a string", field);
+
+	return str;
+}
+
+static lua_Integer
+entryint(lua_State *L, const char *field)
+{
+	lua_Integer v;
+
+	lua_getfield(L, 1, field);
+	if (!lua_isnumber(L, -1))
+		luaL_error(L, "%s is not a number", field);
+	v = lua_tointeger(L, -1);
+	lua_pop(L, 1);
+
+	return v;
+}
+
+static int
+iface_tostring(lua_State *L)
+{
+	checkentry(L, "PFIFACEMT", "an interface");
+	lua_pushstring(L, entrystring(L, "name"));
+
+	return 1;
+}
+
+/* pfctl writes the rate as thousandths, printed as N.N over the period. */
+static int
+srcnode_tostring(lua_State *L)
+{
+	luaL_Buffer b;
+	lua_Integer count, seconds, states, conns;
+	const char *type;
+
+	checkentry(L, "PFSRCNODEMT", "a source node");
+
+	states = entryint(L, "states");
+	conns = entryint(L, "connections");
+
+	lua_getfield(L, 1, "conn_rate");
+	if (!lua_istable(L, -1))
+		luaL_error(L, "conn_rate is not a table");
+	lua_getfield(L, -1, "count");
+	count = lua_tointeger(L, -1);
+	lua_getfield(L, -2, "seconds");
+	seconds = lua_tointeger(L, -1);
+	lua_pop(L, 3);
+
+	luaL_buffinit(L, &b);
+	luaL_addstring(&b, entrystring(L, "address"));
+
+	lua_getfield(L, 1, "translation");
+	if (!lua_isnil(L, -1)) {
+		const char *raddr = lua_tostring(L, -1);
+
+		if (raddr == NULL)
+			luaL_error(L, "translation is not a string");
+		type = entrystring(L, "type");
+		if (strcmp(type, "none") == 0)
+			luaL_addstring(&b, " ??? ");
+		else {
+			luaL_addchar(&b, ' ');
+			luaL_addstring(&b, type);
+			luaL_addstring(&b, "-to ");
+		}
+		luaL_addstring(&b, raddr);
+	}
+
+	lua_pushfstring(L, " ( states %I, connections %I, rate %I.%I/%Is )",
+	    states, conns, (lua_Integer)(count / 1000),
+	    (lua_Integer)((count % 1000) / 100), seconds);
+	luaL_addvalue(&b);
+
+	luaL_pushresult(&b);
+
+	return 1;
+}
+
+static void
+setentrymeta(lua_State *L, const char *name, lua_CFunction f)
+{
+	if (luaL_newmetatable(L, name)) {
+		lua_pushcfunction(L, f);
+		lua_setfield(L, -2, "__tostring");
+	}
+	lua_setmetatable(L, -2);
+}
+
 int
 pfinterfaces(lua_State *L)
 {
@@ -239,6 +362,7 @@ pfinterfaces(lua_State *L)
 
 		pushifcounters(L, k);
 
+		setentrymeta(L, "PFIFACEMT", iface_tostring);
 		lua_rawseti(L, -2, i + 1);
 	}
 
@@ -377,6 +501,7 @@ pfsrcnodes(lua_State *L)
 			lua_setfield(L, -2, "rule");
 		}
 
+		setentrymeta(L, "PFSRCNODEMT", srcnode_tostring);
 		lua_rawseti(L, -2, (lua_Integer)i + 1);
 	}
 

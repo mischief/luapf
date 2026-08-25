@@ -132,6 +132,178 @@ sums pfctl averages to print queue delay.
 @treturn table array of queue tables
 @raise if the ioctl fails
 */
+/*
+ * A queue entry is a lua table rather than userdata, which is no barrier
+ * to a metamethod. This renders what pfctl prints for one queue.
+ */
+static void
+addbwspec(lua_State *L, luaL_Buffer *b, const char *prefix, int idx)
+{
+	static const char unit[] = " KMG";
+	lua_Integer pct, abs;
+	char num[32];
+	int i;
+
+	lua_getfield(L, idx, "percent");
+	pct = lua_tointeger(L, -1);
+	lua_getfield(L, idx, "absolute");
+	abs = lua_tointeger(L, -1);
+	lua_pop(L, 2);
+
+	if (pct != 0) {
+		snprintf(num, sizeof(num), "%s%lld%%", prefix,
+		    (long long)pct);
+		luaL_addstring(b, num);
+	} else if (abs != 0) {
+		for (i = 0; abs >= 1000 && i < 3 && (abs % 1000 == 0); i++)
+			abs /= 1000;
+		snprintf(num, sizeof(num), "%s%lld%c", prefix, (long long)abs,
+		    unit[i]);
+		luaL_addstring(b, num);
+	}
+}
+
+/* A curve is its second slope, plus the first as a burst when one is set. */
+static void
+addscspec(lua_State *L, luaL_Buffer *b, const char *prefix, const char *field)
+{
+	char num[32];
+	lua_Integer d;
+
+	lua_getfield(L, 1, field);
+	if (!lua_istable(L, -1))
+		luaL_error(L, "%s is not a table", field);
+	lua_getfield(L, -1, "m2");
+	addbwspec(L, b, prefix, lua_gettop(L));
+	lua_pop(L, 1);
+
+	lua_getfield(L, -1, "d");
+	d = lua_tointeger(L, -1);
+	lua_pop(L, 1);
+
+	if (d != 0) {
+		luaL_addstring(b, " burst ");
+		lua_getfield(L, -1, "m1");
+		addbwspec(L, b, "", lua_gettop(L));
+		lua_pop(L, 1);
+		snprintf(num, sizeof(num), " for %lldms", (long long)d);
+		luaL_addstring(b, num);
+	}
+	lua_pop(L, 1);
+}
+
+static int
+hasbandwidth(lua_State *L)
+{
+	lua_Integer a1, a2;
+
+	lua_getfield(L, 1, "linkshare");
+	lua_getfield(L, -1, "m1");
+	lua_getfield(L, -1, "absolute");
+	a1 = lua_tointeger(L, -1);
+	lua_pop(L, 2);
+	lua_getfield(L, -1, "m2");
+	lua_getfield(L, -1, "absolute");
+	a2 = lua_tointeger(L, -1);
+	lua_pop(L, 3);
+
+	return a1 != 0 || a2 != 0;
+}
+
+/*
+ * A metamethod is reachable through getmetatable, so it can be called
+ * with anything at all. Accept only a table this module gave this
+ * metatable, and check the fields it reads, which stay writable.
+ */
+static const char *
+queuestring(lua_State *L, const char *field)
+{
+	const char *str;
+
+	lua_getfield(L, 1, field);
+	str = lua_tostring(L, -1);
+	if (str == NULL)
+		luaL_error(L, "%s is not a string", field);
+	lua_pop(L, 1);
+
+	return str;
+}
+
+static int
+queue_tostring(lua_State *L)
+{
+	luaL_Buffer b;
+	char num[64];
+	const char *str;
+
+	if (!lua_getmetatable(L, 1)) {
+		luaL_error(L, "expected a queue");
+		return 0;
+	}
+	luaL_getmetatable(L, "PFQUEUEMT");
+	if (!lua_rawequal(L, -1, -2))
+		luaL_error(L, "expected a queue");
+	lua_pop(L, 2);
+
+	luaL_buffinit(L, &b);
+
+	luaL_addstring(&b, "queue ");
+	luaL_addstring(&b, queuestring(L, "name"));
+
+	str = queuestring(L, "parent");
+	if (*str != '\0') {
+		luaL_addstring(&b, " parent ");
+		luaL_addstring(&b, str);
+	} else {
+		str = queuestring(L, "ifname");
+		if (*str != '\0') {
+			luaL_addstring(&b, " on ");
+			luaL_addstring(&b, str);
+		}
+	}
+
+	lua_getfield(L, 1, "flowqueue_class");
+	if (lua_toboolean(L, -1)) {
+		lua_getfield(L, 1, "flowqueue");
+		lua_getfield(L, -1, "flows");
+		snprintf(num, sizeof(num), " flows %lld",
+		    (long long)lua_tointeger(L, -1));
+		luaL_addstring(&b, num);
+		lua_pop(L, 1);
+		lua_getfield(L, -1, "quantum");
+		if (lua_tointeger(L, -1) > 0) {
+			snprintf(num, sizeof(num), " quantum %lld",
+			    (long long)lua_tointeger(L, -1));
+			luaL_addstring(&b, num);
+		}
+		lua_pop(L, 2);
+	}
+	lua_pop(L, 1);
+
+	if (hasbandwidth(L)) {
+		addscspec(L, &b, " bandwidth ", "linkshare");
+		addscspec(L, &b, ", min ", "realtime");
+		addscspec(L, &b, ", max ", "upperlimit");
+	}
+
+	lua_getfield(L, 1, "default_queue");
+	if (lua_toboolean(L, -1))
+		luaL_addstring(&b, " default");
+	lua_pop(L, 1);
+
+	lua_getfield(L, 1, "qlimit");
+	if (lua_tointeger(L, -1) != 0) {
+		snprintf(num, sizeof(num), " qlimit %lld",
+		    (long long)lua_tointeger(L, -1));
+		luaL_addstring(&b, num);
+	}
+	lua_pop(L, 1);
+
+	luaL_pushresult(&b);
+
+	return 1;
+}
+
 int
 pfqueues(lua_State *L)
 {
@@ -249,6 +421,12 @@ pfqueues(lua_State *L)
 			             stats.hfsc.drop_cnt.packets,
 			             stats.hfsc.drop_cnt.bytes);
 		}
+
+		if (luaL_newmetatable(L, "PFQUEUEMT")) {
+			lua_pushcfunction(L, queue_tostring);
+			lua_setfield(L, -2, "__tostring");
+		}
+		lua_setmetatable(L, -2);
 
 		lua_rawseti(L, -2, i + 1);
 	}
