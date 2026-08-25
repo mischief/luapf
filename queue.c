@@ -151,14 +151,13 @@ addbwspec(lua_State *L, luaL_Buffer *b, const char *prefix, int idx)
 	lua_pop(L, 2);
 
 	if (pct != 0) {
-		snprintf(num, sizeof(num), "%s%lld%%", prefix,
-		    (long long)pct);
+		snprintf(num, sizeof(num), "%s%lld%%", prefix, (long long)pct);
 		luaL_addstring(b, num);
 	} else if (abs != 0) {
 		for (i = 0; abs >= 1000 && i < 3 && (abs % 1000 == 0); i++)
 			abs /= 1000;
 		snprintf(num, sizeof(num), "%s%lld%c", prefix, (long long)abs,
-		    unit[i]);
+		         unit[i]);
 		luaL_addstring(b, num);
 	}
 }
@@ -267,13 +266,13 @@ queue_tostring(lua_State *L)
 		lua_getfield(L, 1, "flowqueue");
 		lua_getfield(L, -1, "flows");
 		snprintf(num, sizeof(num), " flows %lld",
-		    (long long)lua_tointeger(L, -1));
+		         (long long)lua_tointeger(L, -1));
 		luaL_addstring(&b, num);
 		lua_pop(L, 1);
 		lua_getfield(L, -1, "quantum");
 		if (lua_tointeger(L, -1) > 0) {
 			snprintf(num, sizeof(num), " quantum %lld",
-			    (long long)lua_tointeger(L, -1));
+			         (long long)lua_tointeger(L, -1));
 			luaL_addstring(&b, num);
 		}
 		lua_pop(L, 2);
@@ -294,7 +293,7 @@ queue_tostring(lua_State *L)
 	lua_getfield(L, 1, "qlimit");
 	if (lua_tointeger(L, -1) != 0) {
 		snprintf(num, sizeof(num), " qlimit %lld",
-		    (long long)lua_tointeger(L, -1));
+		         (long long)lua_tointeger(L, -1));
 		luaL_addstring(&b, num);
 	}
 	lua_pop(L, 1);

@@ -992,7 +992,9 @@ key's reading of an end in parentheses where the two disagree. An af-to
 state takes the outbound arrow whichever way it runs.
 @function state:__tostring
 @treturn string
-@usage print(tostring(s)) -- em0 tcp 10.0.0.1:22 &lt;- 10.0.0.2:51000       ESTABLISHED:ESTABLISHED
+@usage
+print(tostring(s))
+-- em0 tcp 10.0.0.1:22 &lt;- 10.0.0.2:51000       ESTABLISHED:ESTABLISHED
 */
 static int
 pfstatetostring(lua_State *L)

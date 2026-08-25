@@ -273,8 +273,8 @@ srcnode_tostring(lua_State *L)
 	}
 
 	lua_pushfstring(L, " ( states %I, connections %I, rate %I.%I/%Is )",
-	    states, conns, (lua_Integer)(count / 1000),
-	    (lua_Integer)((count % 1000) / 100), seconds);
+	                states, conns, (lua_Integer)(count / 1000),
+	                (lua_Integer)((count % 1000) / 100), seconds);
 	luaL_addvalue(&b);
 
 	luaL_pushresult(&b);
