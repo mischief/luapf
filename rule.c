@@ -138,8 +138,21 @@ addaddrwrap(lua_State *L, luaL_Buffer *b, const struct pf_addr_wrap *aw,
 
 	switch (aw->type) {
 	case PF_ADDR_DYNIFTL:
+		/*
+		 * The modifiers are not decoration: (em0) is the interface's
+		 * addresses, (em0:network) is the network it sits on. Dropping
+		 * them renders one as the other.
+		 */
 		luaL_addchar(b, '(');
 		addbounded(b, aw->v.ifname, sizeof(aw->v.ifname));
+		if (aw->iflags & PFI_AFLAG_NETWORK)
+			luaL_addstring(b, ":network");
+		if (aw->iflags & PFI_AFLAG_BROADCAST)
+			luaL_addstring(b, ":broadcast");
+		if (aw->iflags & PFI_AFLAG_PEER)
+			luaL_addstring(b, ":peer");
+		if (aw->iflags & PFI_AFLAG_NOALIAS)
+			luaL_addstring(b, ":0");
 		luaL_addchar(b, ')');
 		return;
 	case PF_ADDR_TABLE:
@@ -180,7 +193,9 @@ addaddrwrap(lua_State *L, luaL_Buffer *b, const struct pf_addr_wrap *aw,
 
 	int bits = maskbits(&aw->v.a.mask);
 
-	if (bits < (af == AF_INET6 ? 128 : 32)) {
+	/* A rule with no address family compares against the wider width,
+	 * the same way pfctl does, so a /32 host still prints its mask. */
+	if (bits < (af == AF_INET ? 32 : 128)) {
 		snprintf(num, sizeof(num), "/%d", bits);
 		luaL_addstring(b, num);
 	}
@@ -230,9 +245,12 @@ addport(luaL_Buffer *b, const struct pf_rule_addr *ra)
 	case PF_OP_RRG:
 		snprintf(num, sizeof(num), "%u", ntohs(ra->port[0]));
 		luaL_addstring(b, num);
-		luaL_addchar(b, ' ');
+		/* An inclusive range is written tight, unlike >< and <>. */
+		if (ra->port_op != PF_OP_RRG)
+			luaL_addchar(b, ' ');
 		luaL_addstring(b, op);
-		luaL_addchar(b, ' ');
+		if (ra->port_op != PF_OP_RRG)
+			luaL_addchar(b, ' ');
 		snprintf(num, sizeof(num), "%u", ntohs(ra->port[1]));
 		luaL_addstring(b, num);
 		return;
@@ -385,6 +403,17 @@ rule_log(lua_State *L, int idx)
 	return 1;
 }
 
+/* True when the rule matches every interface EXCEPT `interface`. */
+static int
+rule_interface_not(lua_State *L, int idx)
+{
+	struct luapfrule *r = luaL_checkudata(L, idx, PFRULE_MT);
+
+	lua_pushboolean(L, r->rule.ifnot != 0);
+
+	return 1;
+}
+
 static int
 rule_keep_state(lua_State *L, int idx)
 {
@@ -531,6 +560,7 @@ static const struct ro_property rule_properties[] = {
     {"anchor_call",  rule_anchor_call },
     {"source",       rule_src         },
     {"destination",  rule_dst         },
+    {"interface_not", rule_interface_not},
     {"evaluations",  rule_evaluations },
     {"packets_in",   rule_packets_in  },
     {"packets_out",  rule_packets_out },
@@ -619,6 +649,10 @@ pfruletostring(lua_State *L)
 
 	if (r->rule.ifname[0] != '\0') {
 		luaL_addstring(&b, " on ");
+		/* Without this the rule reads as matching exactly the
+		 * interface it is written to exclude. */
+		if (r->rule.ifnot)
+			luaL_addstring(&b, "! ");
 		addbounded(&b, r->rule.ifname, sizeof(r->rule.ifname));
 	}
 
@@ -746,9 +780,10 @@ luapf_rules_register(lua_State *L)
 A single rule.
 
 Read-only properties: nr, action, direction, af, proto, quick, log,
-keep_state, interface, label, tag, anchor, anchor_call, source,
-destination, evaluations, packets_in, packets_out, bytes_in, bytes_out,
-states_cur and states_total. Source and destination render the way pfctl
-prints them, tables as &lt;name&gt; and interfaces as (name).
+keep_state, interface, interface_not, label, tag, anchor, anchor_call,
+source, destination, evaluations, packets_in, packets_out, bytes_in,
+bytes_out, states_cur and states_total. Source and destination render the
+way pfctl prints them, tables as &lt;name&gt; and interfaces as (name).
+interface_not says the rule matches every interface except the one named.
 @table rule
 */
