@@ -877,10 +877,210 @@ pfstatepairs(lua_State *L)
 	return 3;
 }
 
+static void
+addbounded(luaL_Buffer *b, const char *s, size_t size)
+{
+	luaL_addlstring(b, s, strnlen(s, size));
+}
+
+/*
+ * pfctl's print_host: the routing domain first and only when it is set,
+ * then the address, then the port. A zero port is no port at all, which is
+ * how a protocol PF gives no ports to prints as a bare address.
+ */
+static void
+addhost(lua_State *L, luaL_Buffer *b, const struct pf_addr *a, uint16_t port,
+        sa_family_t af, uint16_t rdomain)
+{
+	char s[INET6_ADDRSTRLEN];
+	char num[16];
+
+	if (rdomain != 0) {
+		snprintf(num, sizeof(num), "(%u) ", be16toh(rdomain));
+		luaL_addstring(b, num);
+	}
+
+	if (inet_ntop(af, &a->pfa, s, sizeof(s)) == NULL)
+		luaL_error(L, "inet_ntop: %s", strerror(errno));
+
+	luaL_addstring(b, s);
+
+	if (port == 0)
+		return;
+
+	if (af == AF_INET)
+		snprintf(num, sizeof(num), ":%u", be16toh(port));
+	else
+		snprintf(num, sizeof(num), "[%u]", be16toh(port));
+
+	luaL_addstring(b, num);
+}
+
+/* The route-to target, which pfctl prints in braces beside its own end. */
+static void
+addroutetarget(lua_State *L, luaL_Buffer *b, const struct pf_addr *a,
+               sa_family_t af)
+{
+	char s[INET6_ADDRSTRLEN];
+
+	if (inet_ntop(af, &a->pfa, s, sizeof(s)) == NULL)
+		luaL_error(L, "inet_ntop: %s", strerror(errno));
+
+	luaL_addstring(b, " {");
+	luaL_addstring(b, s);
+	luaL_addchar(b, '}');
+}
+
+/*
+ * The connection levels as pfctl prints them, which is not src_state and
+ * dst_state joined: pfctl names a proxy state from either peer, refuses a
+ * TCP pair it cannot name outright, and falls back to the numbers.
+ */
+static void
+addlevels(luaL_Buffer *b, const struct pfsync_state *s,
+          const struct pfsync_state_peer *src,
+          const struct pfsync_state_peer *dst)
+{
+	static const char *const udpnames[] = PFUDPS_NAMES;
+	static const char *const othernames[] = PFOTHERS_NAMES;
+	const char *const *names = NULL;
+	char num[64];
+
+	if (s->proto == IPPROTO_TCP) {
+		if (src->state <= TCPS_TIME_WAIT &&
+		    dst->state <= TCPS_TIME_WAIT) {
+			names = tcpstates;
+		} else if (src->state == PF_TCPS_PROXY_SRC ||
+		           dst->state == PF_TCPS_PROXY_SRC) {
+			luaL_addstring(b, "PROXY:SRC");
+			return;
+		} else if (src->state == PF_TCPS_PROXY_DST ||
+		           dst->state == PF_TCPS_PROXY_DST) {
+			luaL_addstring(b, "PROXY:DST");
+			return;
+		} else {
+			snprintf(num, sizeof(num), "<BAD STATE LEVELS %u:%u>",
+			         src->state, dst->state);
+			luaL_addstring(b, num);
+			return;
+		}
+	} else if (s->proto == IPPROTO_UDP && src->state < PFUDPS_NSTATES &&
+	           dst->state < PFUDPS_NSTATES) {
+		names = udpnames;
+	} else if (s->proto != IPPROTO_ICMP && s->proto != IPPROTO_ICMPV6 &&
+	           src->state < PFOTHERS_NSTATES &&
+	           dst->state < PFOTHERS_NSTATES) {
+		names = othernames;
+	}
+
+	if (names == NULL) {
+		snprintf(num, sizeof(num), "%u:%u", src->state, dst->state);
+		luaL_addstring(b, num);
+		return;
+	}
+
+	luaL_addstring(b, names[src->state]);
+	luaL_addchar(b, ':');
+	luaL_addstring(b, names[dst->state]);
+}
+
+/***
+Render a state exactly as a pfctl -s states line prints it.
+
+The near end comes first, then the arrow, then the far end, with the other
+key's reading of an end in parentheses where the two disagree. An af-to
+state takes the outbound arrow whichever way it runs.
+@function state:__tostring
+@treturn string
+@usage print(tostring(s)) -- em0 tcp 10.0.0.1:22 &lt;- 10.0.0.2:51000       ESTABLISHED:ESTABLISHED
+*/
+static int
+pfstatetostring(lua_State *L)
+{
+	struct pfsync_state *s = luaL_checkudata(L, 1, PFSTATE_MT);
+	const struct pfsync_state_peer *src, *dst;
+	struct pfsync_state_key sk, nk;
+	const char *proto = cacheprotoent(s->proto);
+	int afto = stateafto(s);
+	int icmp = s->proto == IPPROTO_ICMP || s->proto == IPPROTO_ICMPV6;
+	luaL_Buffer b;
+	char num[16];
+
+	/*
+	 * The keys are copied because ICMP needs one port overwritten: the
+	 * two keys carry different ICMP ids, and without this every ICMP
+	 * state would report a translation it does not have.
+	 */
+	if ((int)s->direction == PF_OUT) {
+		src = &s->src;
+		dst = &s->dst;
+		sk = s->key[PF_SK_STACK];
+		nk = s->key[PF_SK_WIRE];
+		if (icmp)
+			sk.port[0] = nk.port[0];
+	} else {
+		src = &s->dst;
+		dst = &s->src;
+		sk = s->key[PF_SK_WIRE];
+		nk = s->key[PF_SK_STACK];
+		if (icmp)
+			sk.port[1] = nk.port[1];
+	}
+
+	luaL_buffinit(L, &b);
+
+	addbounded(&b, s->ifname, sizeof(s->ifname));
+	luaL_addchar(&b, ' ');
+
+	if (proto != NULL) {
+		luaL_addstring(&b, proto);
+	} else {
+		snprintf(num, sizeof(num), "%u", s->proto);
+		luaL_addstring(&b, num);
+	}
+	luaL_addchar(&b, ' ');
+
+	addhost(L, &b, &nk.addr[1], nk.port[1], nk.af, nk.rdomain);
+	if (nk.af != sk.af || PF_ANEQ(&nk.addr[1], &sk.addr[1], nk.af) ||
+	    nk.port[1] != sk.port[1] || nk.rdomain != sk.rdomain) {
+		int i = afto ? 0 : 1;
+
+		luaL_addstring(&b, " (");
+		addhost(L, &b, &sk.addr[i], sk.port[i], sk.af, sk.rdomain);
+		luaL_addchar(&b, ')');
+	}
+
+	if ((int)s->direction == PF_IN && !PF_AZERO(&s->rt_addr, sk.af))
+		addroutetarget(L, &b, &s->rt_addr, sk.af);
+
+	luaL_addstring(&b, stateoutward(s) ? " -> " : " <- ");
+
+	addhost(L, &b, &nk.addr[0], nk.port[0], nk.af, nk.rdomain);
+	if (nk.af != sk.af || PF_ANEQ(&nk.addr[0], &sk.addr[0], nk.af) ||
+	    nk.port[0] != sk.port[0] || nk.rdomain != sk.rdomain) {
+		int i = afto ? 1 : 0;
+
+		luaL_addstring(&b, " (");
+		addhost(L, &b, &sk.addr[i], sk.port[i], sk.af, sk.rdomain);
+		luaL_addchar(&b, ')');
+	}
+
+	if ((int)s->direction == PF_OUT && !PF_AZERO(&s->rt_addr, nk.af))
+		addroutetarget(L, &b, &s->rt_addr, nk.af);
+
+	luaL_addstring(&b, "       ");
+	addlevels(&b, s, src, dst);
+
+	luaL_pushresult(&b);
+
+	return 1;
+}
+
 static const luaL_Reg pfstatemeta[] = {
-    {"__index", pfstateindex},
-    {"__pairs", pfstatepairs},
-    {NULL,      NULL        },
+    {"__index",    pfstateindex   },
+    {"__pairs",    pfstatepairs   },
+    {"__tostring", pfstatetostring},
+    {NULL,         NULL           },
 };
 
 static int
@@ -1071,6 +1271,11 @@ joined by commas, empty when no bit is set.
 Counters: packets_in, packets_out, bytes_in and bytes_out, counting the
 direction PF saw the packet in, the same as everywhere else in this
 binding.
+
+tostring renders the state as a pfctl -s states line. It is not built
+out of the properties above: pfctl leaves a zero port off entirely, hides
+the ICMP id difference the two keys carry, and names a TCP proxy pair from
+either peer.
 
 TCP windows: src_seqlo, src_seqhi, src_seqdiff, src_max_win, src_mss,
 src_wscale and the same six for dst. The window PF allows a peer is

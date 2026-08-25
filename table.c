@@ -29,6 +29,7 @@ struct luapftable {
 
 static int pftableindex(lua_State *L);
 static int pftablepairs(lua_State *L);
+static int pftabletostring(lua_State *L);
 static int pftablelen(lua_State *L);
 static int pftablegc(lua_State *L);
 static int pftableaddresses(lua_State *L);
@@ -61,11 +62,12 @@ static const luaL_Reg pftablemethods[] = {
 };
 
 static const luaL_Reg pftablemeta[] = {
-    {"__index", pftableindex},
-    {"__pairs", pftablepairs},
-    {"__len",   pftablelen  },
-    {"__gc",    pftablegc   },
-    {NULL,      NULL        },
+    {"__index",    pftableindex   },
+    {"__pairs",    pftablepairs   },
+    {"__len",      pftablelen     },
+    {"__tostring", pftabletostring},
+    {"__gc",       pftablegc      },
+    {NULL,         NULL           },
 };
 
 /* Copies the table name and anchor into an ioctl request. */
@@ -1128,6 +1130,27 @@ pftablepairs(lua_State *L)
 	return 3;
 }
 
+/***
+Render a table exactly as a pfctl -s Tables line prints it: the name, and
+the anchor after an @ where the table belongs to one.
+@function tableobject:__tostring
+@treturn string
+@usage print(tostring(t)) -- bruteforce@spamd
+*/
+static int
+pftabletostring(lua_State *L)
+{
+	struct luapftable *lpft = luaL_checkudata(L, 1, PFTABLE_MT);
+
+	if (lpft->table->pfrt_anchor[0] != '\0')
+		lua_pushfstring(L, "%s@%s", lpft->table->pfrt_name,
+		                lpft->table->pfrt_anchor);
+	else
+		lua_pushstring(L, lpft->table->pfrt_name);
+
+	return 1;
+}
+
 static int
 pftablelen(lua_State *L)
 {
@@ -1548,6 +1571,7 @@ table sum and the sum of its addresses only agree while the xpass cells
 are zero.
 
 All of them are a snapshot; refresh re-reads them. The length operator
-returns the address count.
+returns the address count, and tostring renders the table as a
+pfctl -s Tables line.
 @table tableobject
 */

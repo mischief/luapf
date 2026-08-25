@@ -94,8 +94,15 @@ local function checkstate(st)
 	assert(ishostport(st.gateway), "bad gateway " .. tostring(st.gateway))
 	-- gateway is the same endpoint as the far side of translation sees
 	-- it, so it shares an address family with the endpoint it mirrors.
+	-- A rule that translates between families is the one case where the
+	-- two readings of an end differ in family as well as address.
+	local afto = (st.near_wire:sub(1, 1) == "[") ~=
+	    (st.near_stack:sub(1, 1) == "[")
 	local mirrored = st.direction == "out" and st.source or st.destination
-	assert((st.gateway:sub(1, 1) == "[") == (mirrored:sub(1, 1) == "["))
+	if not afto then
+		assert((st.gateway:sub(1, 1) == "[") ==
+		    (mirrored:sub(1, 1) == "["))
+	end
 
 	-- The four addresses a state holds: two ends, each in the view the
 	-- wire has of it and the view the stack has. source, destination and
@@ -105,7 +112,14 @@ local function checkstate(st)
 		assert(ishostport(st[name]), "bad " .. name .. " " ..
 		    tostring(st[name]))
 	end
-	if st.direction == "out" then
+	if afto and st.direction == "in" then
+		-- An af-to state indexes its keys the way an outbound one
+		-- does, so an inbound one reads its named endpoints off the
+		-- stack pair with the wire as the translation.
+		assert(st.source == st.near_stack)
+		assert(st.destination == st.far_stack)
+		assert(st.gateway == st.near_wire)
+	elseif st.direction == "out" then
 		assert(st.source == st.near_wire)
 		assert(st.destination == st.far_wire)
 		assert(st.gateway == st.near_stack)
@@ -191,6 +205,60 @@ local function checkstate(st)
 	assert(st.src_max_win <= 65535 and st.dst_max_win <= 65535)
 end
 
+-- The pfctl spelling of an endpoint the binding renders as host:port:
+-- an IPv6 port goes in brackets after the address, a zero port is not
+-- printed at all, and a routing domain other than the default comes
+-- first.
+local function pfctlhost(hostport, rdomain)
+	local address, port = hostport:match("^%[(.+)%]:(%d+)$")
+	local out
+
+	if address then
+		out = port == "0" and address or
+		    (address .. "[" .. port .. "]")
+	else
+		address, port = hostport:match("^(.+):(%d+)$")
+		out = port == "0" and address or (address .. ":" .. port)
+	end
+
+	if rdomain ~= 0 then
+		out = "(" .. rdomain .. ") " .. out
+	end
+
+	return out
+end
+
+-- tostring renders the state as a pfctl -s states line. A metamethod is
+-- not a property, so the pairs walk above still sees the documented set
+-- and nothing more.
+local function checkrender(st)
+	local line = tostring(st)
+	assert(type(line) == "string" and #line > 0)
+	assert(not line:find("userdata"), "state rendered as an address")
+
+	-- pfctl puts seven spaces between the addresses and the levels, and
+	-- neither half holds a run that long.
+	local ends, levels = line:match("^(.-)       (.+)$")
+	assert(ends and levels, "no level pair in " .. line)
+	assert(ends:sub(1, #st.ifname + 1) == st.ifname .. " ", line)
+	assert(ends:find(" -> ", 1, true) or ends:find(" <- ", 1, true), line)
+	if st.proto then
+		assert(ends:find(" " .. st.proto .. " ", 1, true), line)
+	end
+	assert(ends:find(pfctlhost(st.source, st.rdomain), 1, true), line)
+	assert(ends:find(pfctlhost(st.destination, st.rdomain), 1, true), line)
+
+	-- pfctl orders the pair by the direction PF saw the packets in. It
+	-- also has spellings of its own for a TCP pair it cannot name, and
+	-- those are the only ones that do not read as the two levels.
+	local want = st.direction == "out" and
+	    (st.src_state .. ":" .. st.dst_state) or
+	    (st.dst_state .. ":" .. st.src_state)
+	if not levels:find("^PROXY") and not levels:find("^<") then
+		assert(levels == want, levels .. " is not " .. want)
+	end
+end
+
 local states = h:states()
 assert(type(states) == "userdata")
 local count = #states
@@ -210,6 +278,7 @@ for i = 1, count do
 	local st = states[i]
 	assert(st)
 	checkstate(st)
+	checkrender(st)
 
 	-- __pairs must walk the documented set exactly once each, and agree
 	-- with __index on every value.
@@ -233,6 +302,40 @@ for i = 1, count do
 	assert(not pcall(function()
 		return st[true]
 	end))
+end
+
+-- The rendering against pfctl itself. Only the level pair moves while a
+-- state lives, so the addresses are what is compared; a state that
+-- appeared or expired during the reads is covered by taking pfctl on
+-- both sides of the binding's own read.
+local function pfctlheads()
+	local heads = {}
+	local p = io.popen("pfctl -s states 2>/dev/null", "r")
+
+	if not p then
+		return heads
+	end
+	for line in p:lines() do
+		heads[line:match("^(.-)       ") or line] = true
+	end
+	p:close()
+
+	return heads
+end
+
+local before = pfctlheads()
+local rendered = {}
+for i = 1, count do
+	rendered[#rendered + 1] = tostring(states[i])
+end
+local after = pfctlheads()
+
+if next(before) == nil and next(after) == nil then
+	print("pf_test_states: pfctl printed no states to compare against")
+end
+for _, line in ipairs(rendered) do
+	local head = line:match("^(.-)       ") or line
+	assert(before[head] or after[head], "pfctl never printed: " .. head)
 end
 
 -- A second read of the whole table must describe the same states the same
@@ -410,6 +513,11 @@ for _, name in ipairs({"seqlo", "seqhi", "seqdiff", "max_win", "mss",
 	    "udp state carries a " .. name)
 end
 
+-- The whole line, not just its ends: nothing moves this state, so what
+-- pfctl prints for it now is what it printed a moment ago.
+assert(sh("pfctl -s states"):find(tostring(s4), 1, true),
+    "pfctl never printed: " .. tostring(s4))
+
 local rows = pfctlstates("10.99.1.2:9999")
 assert(#rows == 1, "pfctl shows " .. #rows .. " states for the datagram")
 assert(rows[1].direction == s4.direction)
@@ -567,6 +675,38 @@ assert(icmp, "no state for the echo request")
 checkstate(icmp)
 assert(icmp.connection_state:match("^%d+:%d+$"), icmp.connection_state)
 assert(icmp.src_state:match("^%d+$") and icmp.dst_state:match("^%d+$"))
+
+-- Every state the guest has made by now, line for line against pfctl.
+-- These carry what a quiet host cannot: a translated end in parentheses,
+-- a route-to target in braces, a bare address for a protocol with no
+-- ports, and an ICMP id the two keys disagree on. pfctl is read on both
+-- sides of the binding, so a state that expires in between is not counted
+-- against either.
+local function pfctllines()
+	local lines = {}
+
+	for line in sh("pfctl -s states"):gmatch("[^\n]+") do
+		lines[line] = true
+	end
+
+	return lines
+end
+
+local first = pfctllines()
+local ours = {}
+local everything = h:states()
+for i = 1, #everything do
+	ours[tostring(everything[i])] = true
+end
+local second = pfctllines()
+
+for line in pairs(ours) do
+	assert(first[line] or second[line], "pfctl never printed: " .. line)
+end
+for line in pairs(first) do
+	assert(not second[line] or ours[line],
+	    "pfctl printed a state the binding did not: " .. line)
+end
 
 sh("printf '%s\\n' 'pass log' | pfctl -f -")
 sh("pfctl -a luapf-states -F rules")

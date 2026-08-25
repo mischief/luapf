@@ -124,6 +124,9 @@ end
 assert(next(props) == nil, "pairs offered a key that is not a property")
 
 assert(t1.name == "test1" and t1.anchor == "")
+-- tostring renders the table as a pfctl -s Tables line: the name alone
+-- in the main ruleset, and name@anchor inside an anchor.
+assert(tostring(t1) == "test1")
 assert(t1.persist == true and t1.const == false)
 assert(t1.active == true and t1.inactive == false)
 -- No rule and no anchor names a table this test made, so both reference
@@ -399,6 +402,7 @@ assert(hit:addresses()[1] == "10.99.0.2")
 local inner = assert(handle:gettable("audit/inner"),
     "no table inside the anchor")
 assert(inner.anchor == "audit" and inner.name == "inner")
+assert(tostring(inner) == "inner@audit")
 assert(#inner == 1, "<inner> holds " .. #inner .. " addresses")
 -- pf:tables asks the kernel for the main ruleset only, so a table that
 -- lives in an anchor never appears in the listing.
@@ -420,11 +424,27 @@ assert(not pcall(function() return shadow:addresses() end))
 -- once, which is the only way to reach an anchor's tables without naming
 -- them, and an anchor name asks for just that anchor.
 local sawinner = false
+local rendered = {}
 for _, t in ipairs(handle:tables("*")) do
 	if t.anchor == "audit" and t.name == "inner" then
 		sawinner = true
 	end
+	local line = t.anchor ~= "" and (t.name .. "@" .. t.anchor) or t.name
+	assert(tostring(t) == line, tostring(t) .. " is not " .. line)
 end
+
+-- What pfctl -s Tables prints, table for table. Both list the active
+-- tables of the main ruleset, so the two sets are the same set.
+for _, t in ipairs(handle:tables()) do
+	rendered[tostring(t)] = true
+end
+for line in sh("pfctl -s Tables"):gmatch("[^\n]+") do
+	assert(rendered[line], "pfctl printed a table the binding did not: " ..
+	    line)
+	rendered[line] = nil
+end
+assert(next(rendered) == nil,
+    "the binding printed a table pfctl did not: " .. tostring(next(rendered)))
 assert(sawinner, "pf:tables(\"*\") missed the anchor's table")
 local anchored = handle:tables("audit")
 assert(#anchored == 1 and anchored[1].name == "inner",
