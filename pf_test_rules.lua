@@ -262,13 +262,17 @@ local function checkrule(r, anchor)
 	assert(r.source_track == nil or r.source_track == "global" or
 	    r.source_track == "rule",
 	    "unknown source-track scope: " .. tostring(r.source_track))
-	for _, k in ipairs({{"fragment", " fragment"}, {"once", " once"},
-	    {"allow_opts", " allow-opts"}, {"pflow", " pflow"},
-	    {"sloppy", " sloppy"}, {"if_bound", " if-bound"},
-	    {"no_sync", " no-sync"}, {"no_df", "no-df"},
+	-- A keyword opens its group or follows another, so it is preceded by
+	-- a paren or a space depending on what else the rule asked for. The
+	-- sole option of a group is the case a built ruleset rarely has.
+	for _, k in ipairs({{"fragment", "fragment"}, {"once", "once"},
+	    {"allow_opts", "allow-opts"}, {"pflow", "pflow"},
+	    {"sloppy", "sloppy"}, {"if_bound", "if-bound"},
+	    {"no_sync", "no-sync"}, {"no_df", "no-df"},
 	    {"random_id", "random-id"},
 	    {"reassemble_tcp", "reassemble tcp"}}) do
-		local present = text:find(k[2], 1, true) ~= nil
+		local present = text:find(" " .. k[2], 1, true) ~= nil or
+		    text:find("(" .. k[2], 1, true) ~= nil
 		if r[k[1]] then
 			assert(present, "no " .. k[2] .. " in: " .. text)
 		elseif plain then
