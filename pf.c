@@ -98,6 +98,10 @@ Read the global status.
 The result holds running, since, states, states_halfopen, src_nodes,
 debug, hostid, reass, syncookies_active, syncookies_mode, ifname and
 checksum, plus counters, bcounters and pcounters tables.
+
+since is not a wall clock time: it counts from when the machine booted,
+the way pfctl reads it to work out how long PF has been running. hostid
+is byte swapped into host order, so it reads as pfctl prints it.
 @function pf:status
 @treturn table status
 @raise if the ioctl fails
@@ -129,7 +133,9 @@ pfstatus(lua_State *L)
 	lua_setfield(L, -2, "src_nodes");
 	lua_pushinteger(L, (lua_Integer)st.debug);
 	lua_setfield(L, -2, "debug");
-	lua_pushinteger(L, (lua_Integer)st.hostid);
+	/* The kernel keeps this in network order; pfctl prints it swapped,
+	 * and two tools naming one host differently helps nobody. */
+	lua_pushinteger(L, (lua_Integer)ntohl(st.hostid));
 	lua_setfield(L, -2, "hostid");
 	lua_pushinteger(L, (lua_Integer)st.reass);
 	lua_setfield(L, -2, "reass");
