@@ -20,7 +20,7 @@ network=${3:-isolated}
 name=${LUAPF_VM_NAME:-$(basename "${overlay%.qcow2}")}
 transcript=${LUAPF_VM_TRANSCRIPT:-"$root/.vm/$name-console.log"}
 tests=${LUAPF_VM_TESTS:-"pf_test_tables.lua pf_test_states.lua \
-pf_test_rules.lua pf_test_queues.lua pf_test_system.lua"}
+pf_test_rules.lua pf_test_queues.lua pf_test_system.lua pf_test_nat.lua"}
 # Every guest rule carries `log`, and pflog0 is captured for the whole run,
 # so a failed test comes back with the packets that reached PF rather than
 # only rule counters. The dump is bounded because it returns over the same

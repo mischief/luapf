@@ -211,20 +211,33 @@ state_destination(lua_State *L, int idx)
 	return pushhostport(L, af, a, p);
 }
 
+/*
+ * The same endpoint as the other side of translation sees it: whichever
+ * key gimmekey() did not use. Outbound that is the source the stack asked
+ * for before nat-to rewrote it; inbound, the destination the packet
+ * carried before rdr-to redirected it. pfctl prints it in parentheses.
+ * An untranslated state reports the address it already had.
+ */
 static int
 state_gateway(lua_State *L, int idx)
 {
 	struct pfsync_state *s = luaL_checkudata(L, idx, PFSTATE_MT);
-	const struct pfsync_state_key *stk;
+	const struct pfsync_state_key *other;
 
-	if (s->direction != PF_OUT) {
+	switch (s->direction) {
+	case PF_OUT:
+		other = &s->key[PF_SK_STACK];
+		break;
+	case PF_IN:
+		other = &s->key[PF_SK_WIRE];
+		break;
+	default:
 		lua_pushnil(L);
 		return 1;
 	}
 
-	stk = &s->key[PF_SK_STACK];
-
-	return pushhostport(L, stk->af, &stk->addr[1], be16toh(stk->port[1]));
+	return pushhostport(
+	    L, other->af, &other->addr[1], be16toh(other->port[1]));
 }
 
 static int
