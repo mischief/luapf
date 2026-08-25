@@ -361,18 +361,29 @@ function Console:exec(cmd, timeout)
 
 	local out = {}
 	local deadline = os.time() + (timeout or 60)
+	-- Room for the sentinel, its status and the newline ending it, and
+	-- no more: this is rescanned for every chunk that arrives.
+	local window = #sentinel + 16
+	local seen = ""
 
 	while os.time() < deadline do
 		if not self.hu.readable(self.fd, 1.0) then
 			goto continue
 		end
-		local c = rx(self, self.f:read(1))
+		-- Whatever has arrived, not one byte of it: a test that
+		-- prints its output, or a pflog dump, is tens of kilobytes
+		-- through a 115200 line, and a byte at a time cost one
+		-- read(2) and one rescan of the whole transcript each.
+		local c = rx(self, self.hu.readsome(self.fd, 4096))
 		if not c then
 			return nil, table.concat(out), "console closed"
 		end
 		out[#out + 1] = c
-		local tail = table.concat(out):sub(-256)
-		local status = tail:match(sentinel .. " (%-?%d+)")
+		seen = (seen .. c):sub(-window)
+		-- Anchored on the end of the sentinel's own line: a chunk
+		-- that split the status would otherwise report a prefix of
+		-- it and treat the command as finished early.
+		local status = seen:match(sentinel .. " (%-?%d+)[\r\n]")
 		if status then
 			local full = table.concat(out):gsub("\r", "")
 			-- strip the echoed command line and the sentinel

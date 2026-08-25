@@ -60,6 +60,43 @@ l_readable(lua_State *L)
 	return 1;
 }
 
+/* readsome(fd, max) -> string | nil
+ *
+ * One read(2), returning whatever had arrived rather than waiting for a
+ * count: stdio's read wants its full request and would block on a guest
+ * that has said all it means to say for now. Safe alongside the stream
+ * serial() returns only because that stream is unbuffered, so stdio is
+ * never holding bytes this would step over. Returns nil at end of file.
+ */
+static int
+l_readsome(lua_State *L)
+{
+	int fd = (int)luaL_checkinteger(L, 1);
+	lua_Integer max = luaL_optinteger(L, 2, 4096);
+	char buf[65536];
+	ssize_t n;
+
+	if (max <= 0 || (size_t)max > sizeof(buf))
+		max = (lua_Integer)sizeof(buf);
+
+	n = read(fd, buf, (size_t)max);
+	if (n < 0) {
+		if (errno == EAGAIN || errno == EINTR) {
+			lua_pushliteral(L, "");
+			return 1;
+		}
+		lua_pushnil(L);
+		lua_pushstring(L, strerror(errno));
+		return 2;
+	}
+	if (n == 0) {
+		lua_pushnil(L);
+		return 1;
+	}
+	lua_pushlstring(L, buf, (size_t)n);
+	return 1;
+}
+
 /* fileno(file) -> fd */
 static int
 l_fileno(lua_State *L)
@@ -217,6 +254,7 @@ static const luaL_Reg serialutil[] = {
 	{ "serial", l_serial },
 	{ "fileno", l_fileno },
 	{ "readable", l_readable },
+	{ "readsome", l_readsome },
 	{ "now", l_now },
 	{ "sleep", l_sleep },
 	{ NULL, NULL },

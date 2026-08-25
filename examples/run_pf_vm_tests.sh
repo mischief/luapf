@@ -3,14 +3,29 @@
 # The host PF is never opened or changed by this script.
 #
 # Usage: run_pf_vm_tests.sh [base.qcow2] [overlay.qcow2] [isolated|uplink]
+#
+# Runs are independent: the guest is named after its own overlay, so several
+# may run at once as long as each is given its own overlay. LUAPF_VM_TESTS
+# picks which guest-side tests run, for working on one of them without
+# editing this file.
 
 selfdir=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$selfdir/.." && pwd)
 base=${1:-"$root/.vm/luapf-pf-test-base.qcow2"}
 overlay=${2:-"$root/.vm/luapf-pf-test-run.qcow2"}
 network=${3:-isolated}
-name=luapf-pf-test-run
+# Named after the overlay, not a fixed string: two runs sharing a VM name
+# would collide in vmctl, and the second would read the first's serial tty
+# out from under it (the tty is discovered by name below).
+name=${LUAPF_VM_NAME:-$(basename "${overlay%.qcow2}")}
 transcript=${LUAPF_VM_TRANSCRIPT:-"$root/.vm/$name-console.log"}
+tests=${LUAPF_VM_TESTS:-"pf_test_tables.lua pf_test_states.lua \
+pf_test_rules.lua pf_test_queues.lua pf_test_system.lua"}
+# Every guest rule carries `log`, and pflog0 is captured for the whole run,
+# so a failed test comes back with the packets that reached PF rather than
+# only rule counters. The dump is bounded because it returns over the same
+# 115200 serial console as everything else.
+pflog_lines=${LUAPF_VM_PFLOG_LINES:-120}
 
 # qcow2 stores the backing filename as supplied to vmctl create.  vmd may
 # resolve that filename from a different working directory, so make both
@@ -74,8 +89,8 @@ mkdir -p "$(dirname "$transcript")"
 # come back as this process's exit status without a second connection to
 # the tty.
 guest_script=$(mktemp)
-cat >"$guest_script" <<'GUEST'
-set -e; cd /root; rm -rf luapf; mkdir luapf; tar -xzhf /root/source.tgz -C luapf; cd luapf; meson setup build; ninja -C build; printf '%s\n' 'pass' | pfctl -f -; nc -l 127.0.0.1 31337 </dev/null >/dev/null & listener=$!; sleep 1; print x | nc -N 127.0.0.1 31337 || true; kill "$listener" 2>/dev/null || true; export LUA_CPATH="$PWD/build/?.so"; for test in pf_test_tables.lua pf_test_states.lua pf_test_rules.lua pf_test_queues.lua pf_test_system.lua; do lua54 "$test"; done
+cat >"$guest_script" <<GUEST
+set -e; cd /root; rm -rf luapf; mkdir luapf; tar -xzhf /root/source.tgz -C luapf; cd luapf; meson setup build; ninja -C build; printf '%s\n' 'pass log' | pfctl -f -; ifconfig pflog0 up; tcpdump -n -i pflog0 -w /tmp/pflog.pcap >/dev/null 2>&1 & pflog=\$!; sleep 1; nc -l 127.0.0.1 31337 </dev/null >/dev/null & listener=\$!; sleep 1; print x | nc -N 127.0.0.1 31337 || true; kill "\$listener" 2>/dev/null || true; export LUA_CPATH="\$PWD/build/?.so"; status=0; for test in $tests; do lua54 "\$test" || { status=\$?; break; }; done; sleep 1; kill "\$pflog" 2>/dev/null || true; sleep 1; print -- "--- pflog (last $pflog_lines of \$(tcpdump -n -r /tmp/pflog.pcap 2>/dev/null | wc -l) packets) ---"; tcpdump -n -e -ttt -r /tmp/pflog.pcap 2>&1 | tail -n $pflog_lines || true; exit \$status
 GUEST
 
 driver=$(mktemp)
