@@ -2,3 +2,5 @@ option('lua', type : 'combo', choices : ['false', 'luajit', 'lua5.1', 'lua5.3', 
 option('lua-module-directory', type : 'string', value : '', description : 'override lua C module directory')
 
 option('trap', type : 'boolean', value : false, description : 'trap on undefined behaviour (kills the lua process)')
+
+option('fuzz', type : 'boolean', value : true, description : 'build fuzz targets and their corpus regression tests')

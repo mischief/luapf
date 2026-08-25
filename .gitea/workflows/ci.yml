@@ -1,0 +1,52 @@
+name: ci
+
+# What a runner can and cannot do here: the pf test suite talks to /dev/pf
+# through doas, so it needs a host with a loaded ruleset and a doas rule for
+# the runner user. CI therefore builds everything, lints everything, and runs
+# only the fuzz suite, whose corpus replay needs neither device nor privilege.
+# The pf suite runs on a developer machine or a vmd(8) test VM.
+
+on: [push, pull_request]
+
+jobs:
+  build:
+    runs-on: openbsd
+    steps:
+      - name: checkout
+        run: git clone --branch ${{ github.ref_name }} --depth 1 ${{ github.server_url }}/${{ github.repository }} src
+
+      - name: setup
+        run: CC=clang-21 meson setup build src
+
+      - name: compile
+        run: meson compile -C build
+
+      - name: fuzz corpus
+        run: meson test -C build --suite fuzz --print-errorlogs
+
+      - name: clang-format
+        run: ninja -C build clang-format-check
+
+      - name: clang-tidy
+        run: ninja -C build clang-tidy
+
+      - name: cppcheck
+        run: ninja -C build cppcheck
+
+  sanitizers:
+    runs-on: openbsd
+    # ASan is unsupported on OpenBSD and no UBSan runtime ships in base or
+    # ports clang, so -Dtrap builds with trapping UBSan instead: a violation
+    # crashes with SIGILL and fails the test that hit it.
+    steps:
+      - name: checkout
+        run: git clone --branch ${{ github.ref_name }} --depth 1 ${{ github.server_url }}/${{ github.repository }} src
+
+      - name: setup
+        run: CC=clang-21 meson setup build-ubsan src -Dtrap=true
+
+      - name: compile
+        run: meson compile -C build-ubsan
+
+      - name: fuzz corpus
+        run: meson test -C build-ubsan --suite fuzz --print-errorlogs

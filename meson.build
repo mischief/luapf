@@ -7,6 +7,7 @@ project('luapf', 'c',
   ])
 
 cc = meson.get_compiler('c')
+native_cc = meson.get_compiler('c', native: true)
 pkgconfig = import('pkgconfig')
 
 # Extra warnings, applied only where the compiler knows them.
@@ -14,28 +15,53 @@ hardening_args = [
   '-Wnull-dereference',
   '-Warray-bounds',
   '-Wsign-conversion',
+  '-Wfloat-equal',
   '-Wformat',
   '-Wformat-security',
   '-Wuninitialized',
   '-Wshadow',
   '-Wimplicit-fallthrough',
+  '-Wswitch',
   '-Wstrict-prototypes',
   '-Wmissing-prototypes',
   '-Wmissing-declarations',
   '-Wvla',
   '-Walloca',
-  '-Wframe-larger-than=8192',
+  '-Wshift-overflow',
+  '-Wreturn-stack-address',
+  '-Wuseless-cast',
+  '-Wframe-larger-than=2048',
+  '-fno-omit-frame-pointer',
   '-Wno-unused-parameter',
 ]
 
 if get_option('trap')
-  # A trap kills the whole lua interpreter with no message. Test builds only.
+  # Trapping UBSan: OpenBSD ships no sanitizer runtime, so a violation has to
+  # abort rather than report. A trap kills the whole lua interpreter with no
+  # message, which is why this is a test build only.
+  hardening_args += '-fsanitize=undefined'
   hardening_args += '-fsanitize-trap=all'
+
+  # Trapping code is not execute-only clean, so opt this build out of W^X.
+  foreach a : ['-Wl,--no-execute-only']
+    if cc.has_link_argument(a)
+      add_project_link_arguments(a, language: 'c')
+    endif
+    if native_cc.has_link_argument(a)
+      add_project_link_arguments(a, language: 'c', native: true)
+    endif
+  endforeach
 endif
 
+# Both machines: add_project_arguments() defaults to the host machine, which
+# leaves a native target such as serialutil with the warning_level flags
+# alone. Every compiler this project runs gets the same warning set.
 foreach a : hardening_args
   if cc.has_argument(a)
     add_project_arguments(a, language: 'c')
+  endif
+  if native_cc.has_argument(a)
+    add_project_arguments(a, language: 'c', native: true)
   endif
 endforeach
 
@@ -95,8 +121,16 @@ lua_bin = find_program(dep_name)
 # vendored here rather than pulled from nlos, so this repo's VM-building
 # machinery does not depend on another project's tree being checked out
 # beside it.
+#
+# Its lua comes from a separate native lookup rather than from lua_dep:
+# lua_dep is the host lookup, and linking it into a native module would
+# be the target lua's headers and library under a cross build. dep_name
+# is already spelled for build_machine, so the two agree whenever the
+# build is native, which is the case everyone actually configures.
+serialutil_lua_dep = dependency(dep_name, native: true)
+
 serialutil = shared_module('serialutil', 'examples/serialutil/serialutil.c',
-  dependencies: [lua_dep],
+  dependencies: [serialutil_lua_dep],
   native: true,
   name_prefix: '',
 )
@@ -142,15 +176,22 @@ pf_test_queues.lua
 pf_test_system.lua
 '''.split()
 
+# Suite 'pf': these open /dev/pf through doas, so they only run on a host
+# with a pf ruleset loaded and a doas rule for the user running them.
 foreach t : pf_tests
   test(t,
     doas_bin,
     depends: lua_pf,
     args: [lua_bin, files(t)],
-    workdir: meson.current_build_dir()
+    workdir: meson.current_build_dir(),
+    suite: 'pf',
   )
 endforeach
 
+
+if get_option('fuzz')
+  subdir('fuzz')
+endif
 
 cppcheck = find_program('cppcheck', required: false)
 if cppcheck.found()

@@ -66,7 +66,7 @@ l_readsome(lua_State *L)
 {
 	int fd = (int)luaL_checkinteger(L, 1);
 	lua_Integer max = luaL_optinteger(L, 2, 4096);
-	char buf[8192];
+	char buf[1024];
 	ssize_t n;
 
 	if (fd < 0)
