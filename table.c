@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: ISC */
 #include <errno.h>
 #include <limits.h>
+#include <stdio.h>
 #include <string.h>
 
 #include <sys/ioctl.h>
@@ -40,11 +41,13 @@ static int pftableaddrstats(lua_State *L);
 static int pftablesetflags(lua_State *L);
 static int pftablereplace(lua_State *L);
 static int pftableclearaddrstats(lua_State *L);
+static int pftableentries(lua_State *L);
 static void argstoaddrs(lua_State *L, struct pfioc_table *pt);
 
 /* Methods reachable as t:name(); __index searches this, then the properties. */
 static const luaL_Reg pftablemethods[] = {
     {"addresses",      pftableaddresses     },
+    {"entries",        pftableentries       },
     {"test",           pftabletest          },
     {"clear",          pftableclear         },
     {"add",            pftableadd           },
@@ -104,6 +107,139 @@ pushaddr(lua_State *L, const struct pfr_addr *pa)
 		lua_pushstring(L, addr);
 }
 
+/* Address families are spelled the way rule.c spells them. */
+static const char *
+afname(uint8_t af)
+{
+	if (af == AF_INET)
+		return "inet";
+
+	return af == AF_INET6 ? "inet6" : "unknown";
+}
+
+/* pfctl prints one letter per feedback code; lua gets the whole word. */
+static const char *const fbacknames[PFR_FB_MAX] = {
+    "none",    "match",     "added",    "deleted",  "changed",
+    "cleared", "duplicate", "notmatch", "conflict", "nocount",
+};
+
+static const char *
+fbackname(uint8_t fb)
+{
+	return fb < PFR_FB_MAX ? fbacknames[fb] : "unknown";
+}
+
+static const char *const entrytypenames[PFRKE_MAX] = {"plain", "route", "cost"};
+
+static const char *
+entrytypename(uint8_t type)
+{
+	return type < PFRKE_MAX ? entrytypenames[type] : "unknown";
+}
+
+/*
+ * Pushes one lua table holding every field of a pfr_addr. negated is
+ * pfra_not: without it a "!" entry is indistinguishable from an ordinary
+ * one. fback is how the kernel answered a request about this entry, and
+ * its nocount value means the entry has no counter block at all, which is
+ * not the same as counters that read zero. Pushes nil for an address
+ * family this binding cannot print.
+ */
+static void
+pushentry(lua_State *L, const struct pfr_addr *pa)
+{
+	pushaddr(L, pa);
+	if (lua_isnil(L, -1))
+		return;
+
+	lua_newtable(L);
+	lua_insert(L, -2);
+	lua_setfield(L, -2, "address");
+
+	lua_pushboolean(L, pa->pfra_not != 0);
+	lua_setfield(L, -2, "negated");
+	lua_pushlstring(L, pa->pfra_ifname,
+	                strnlen(pa->pfra_ifname, sizeof(pa->pfra_ifname)));
+	lua_setfield(L, -2, "ifname");
+	lua_pushinteger(L, (lua_Integer)pa->pfra_states);
+	lua_setfield(L, -2, "states");
+	lua_pushinteger(L, (lua_Integer)pa->pfra_weight);
+	lua_setfield(L, -2, "weight");
+	lua_pushstring(L, entrytypename(pa->pfra_type));
+	lua_setfield(L, -2, "type");
+	lua_pushstring(L, afname(pa->pfra_af));
+	lua_setfield(L, -2, "af");
+	lua_pushstring(L, fbackname(pa->pfra_fback));
+	lua_setfield(L, -2, "fback");
+}
+
+/* Pushes an array of entry tables, skipping what pushentry cannot print. */
+static void
+pushentries(lua_State *L, const struct pfr_addr *pa, int size)
+{
+	int n = 1;
+
+	lua_newtable(L);
+
+	for (int i = 0; i < size; i++) {
+		pushentry(L, &pa[i]);
+		if (lua_isnil(L, -1)) {
+			lua_pop(L, 1);
+			continue;
+		}
+		lua_rawseti(L, -2, n++);
+	}
+}
+
+static const char *const opnames[] = {"block", "match", "pass", "xpass"};
+
+/*
+ * Sets packets_<dir>_<op> and bytes_<dir>_<op> on the lua table on top.
+ * A table keeps four ops and an address three, so nops says which.
+ */
+static void
+setopcounters(lua_State *L, const char *dir, const uint64_t *packets,
+              const uint64_t *bytes, int nops)
+{
+	char name[32];
+
+	for (int op = 0; op < nops; op++) {
+		snprintf(name, sizeof(name), "packets_%s_%s", dir, opnames[op]);
+		lua_pushinteger(L, (lua_Integer)packets[op]);
+		lua_setfield(L, -2, name);
+
+		snprintf(name, sizeof(name), "bytes_%s_%s", dir, opnames[op]);
+		lua_pushinteger(L, (lua_Integer)bytes[op]);
+		lua_setfield(L, -2, name);
+	}
+}
+
+/* Reads one optional boolean out of an option table, or returns def. */
+static int
+optbool(lua_State *L, int idx, const char *name, int def)
+{
+	int v = def;
+
+	if (lua_isnoneornil(L, idx))
+		return def;
+
+	luaL_checktype(L, idx, LUA_TTABLE);
+
+	if (lua_getfield(L, idx, name) != LUA_TNIL)
+		v = lua_toboolean(L, -1);
+
+	lua_pop(L, 1);
+
+	return v;
+}
+
+/* PFR_FLAG_DUMMY asks the kernel to report what it would do, and stop. */
+static int
+dummyflag(lua_State *L, int idx)
+{
+	return optbool(L, idx, "dummy", 0) ? PFR_FLAG_DUMMY : 0;
+}
+
 static struct luapf *
 tablepf(lua_State *L, const struct luapftable *lpft)
 {
@@ -112,24 +248,22 @@ tablepf(lua_State *L, const struct luapftable *lpft)
 	return luaL_checkudata(L, -1, PF_MT);
 }
 
-/***
-List the addresses of a table.
-@function table:addresses
-@treturn table array of strings, a bare address or address/prefix
-@raise if the ioctl fails
-*/
-static int
-pftableaddresses(lua_State *L)
+/*
+ * Reads every address of a table into a lua userdata buffer, which is
+ * left on the stack and returned, and reports how many there are. The
+ * first ioctl only fills in the count. The request lives here rather than
+ * in the caller: struct pfioc_table carries a whole anchor path, so two
+ * of them in one frame overrun the frame size limit this build sets.
+ */
+static struct pfr_addr *
+readaddrs(lua_State *L, const struct luapf *pf, const struct pfr_table *t,
+          int *size)
 {
-	struct luapftable *lpft = luaL_checkudata(L, 1, PFTABLE_MT);
-	struct luapf *pf = tablepf(L, lpft);
 	struct pfioc_table pt;
-	const struct pfr_addr *pat;
-	int n = 1;
 
 	memset(&pt, 0, sizeof(pt));
 	pt.pfrio_esize = sizeof(struct pfr_addr);
-	settablename(&pt, lpft->table);
+	settablename(&pt, t);
 
 	if (ioctl(pf->fd, DIOCRGETADDRS, &pt) < 0)
 		luaL_error(L, "DIOCRGETADDRS: %s", strerror(errno));
@@ -142,11 +276,34 @@ pftableaddresses(lua_State *L)
 	if (ioctl(pf->fd, DIOCRGETADDRS, &pt) < 0)
 		luaL_error(L, "DIOCRGETADDRS: %s", strerror(errno));
 
-	pat = pt.pfrio_buffer;
+	*size = pt.pfrio_size;
+
+	return pt.pfrio_buffer;
+}
+
+/***
+List the addresses of a table.
+
+This is the short form; entries returns the same list with every field
+the kernel keeps beside the address.
+@function table:addresses
+@treturn table array of strings, a bare address or address/prefix
+@raise if the ioctl fails
+*/
+static int
+pftableaddresses(lua_State *L)
+{
+	struct luapftable *lpft = luaL_checkudata(L, 1, PFTABLE_MT);
+	struct luapf *pf = tablepf(L, lpft);
+	const struct pfr_addr *pat;
+	int size;
+	int n = 1;
+
+	pat = readaddrs(L, pf, lpft->table, &size);
 
 	lua_newtable(L);
 
-	for (int i = 0; i < pt.pfrio_size; i++) {
+	for (int i = 0; i < size; i++) {
 		pushaddr(L, &pat[i]);
 		if (lua_isnil(L, -1)) {
 			lua_pop(L, 1);
@@ -154,6 +311,31 @@ pftableaddresses(lua_State *L)
 		}
 		lua_rawseti(L, -2, n++);
 	}
+
+	return 1;
+}
+
+/***
+List the addresses of a table with every field of each entry.
+
+Each entry holds address, negated, ifname, states, weight, type, af and
+fback. negated is the `!` of pf.conf, ifname is what pfctl prints as
+`@ifname`, and type is one of plain, route and cost.
+@function table:entries
+@treturn table array of entry tables
+@raise if the ioctl fails
+@usage for _, e in ipairs(t:entries()) do print(e.address, e.negated) end
+*/
+static int
+pftableentries(lua_State *L)
+{
+	struct luapftable *lpft = luaL_checkudata(L, 1, PFTABLE_MT);
+	struct luapf *pf = tablepf(L, lpft);
+	const struct pfr_addr *pat;
+	int size;
+
+	pat = readaddrs(L, pf, lpft->table, &size);
+	pushentries(L, pat, size);
 
 	return 1;
 }
@@ -173,8 +355,15 @@ addrsum(const uint64_t v[PFR_OP_ADDR_MAX])
 Read the per-address counters of a table.
 
 The kernel only keeps these while the table carries the counters flag,
-which setflags turns on. Each entry holds address, packets_in,
-packets_out, bytes_in, bytes_out and cleared.
+which setflags turns on. An entry whose fback is nocount has no counter
+block at all, which is not the same as counters that read zero.
+
+Each entry holds every field entries returns, plus cleared, the summed
+packets_in, packets_out, bytes_in and bytes_out, and one pair of
+packets_<dir>_<op> and bytes_<dir>_<op> for each of the three ops the
+kernel keeps per address: block, match and pass. The sums add those
+three, while a table object sums four, so an address total and its
+table's total only agree while the table's xpass counters are zero.
 @function table:addrstats
 @treturn table array of counter tables
 @raise if the ioctl fails
@@ -210,15 +399,16 @@ pftableaddrstats(lua_State *L)
 	for (int i = 0; i < pt.pfrio_size; i++) {
 		const struct pfr_astats *a = &as[i];
 
-		pushaddr(L, &a->pfras_a);
+		pushentry(L, &a->pfras_a);
 		if (lua_isnil(L, -1)) {
 			lua_pop(L, 1);
 			continue;
 		}
 
-		lua_newtable(L);
-		lua_insert(L, -2);
-		lua_setfield(L, -2, "address");
+		setopcounters(L, "in", a->pfras_packets[PFR_DIR_IN],
+		              a->pfras_bytes[PFR_DIR_IN], PFR_OP_ADDR_MAX);
+		setopcounters(L, "out", a->pfras_packets[PFR_DIR_OUT],
+		              a->pfras_bytes[PFR_DIR_OUT], PFR_OP_ADDR_MAX);
 
 		lua_pushinteger(
 		    L, (lua_Integer)addrsum(a->pfras_packets[PFR_DIR_IN]));
@@ -259,6 +449,8 @@ flagfield(lua_State *L, int idx, const char *name, int flag, int *set, int *clr)
 Replace the whole content of a table in one step.
 @function table:replace
 @param addresses a string, or an array of strings
+@tparam[opt] table opts dummy asks what the call would do and changes
+nothing
 @treturn int added
 @treturn int deleted
 @treturn int changed
@@ -268,14 +460,15 @@ static int
 pftablereplace(lua_State *L)
 {
 	struct luapftable *lpft = luaL_checkudata(L, 1, PFTABLE_MT);
-	struct luapf *pf = tablepf(L, lpft);
+	struct luapf *pf;
 	struct pfioc_table pt;
+	int flags = dummyflag(L, 3);
+
+	pf = tablepf(L, lpft);
 
 	memset(&pt, 0, sizeof(pt));
+	pt.pfrio_flags = flags;
 	settablename(&pt, lpft->table);
-
-	luaL_argcheck(L, (lua_istable(L, 2) || lua_isstring(L, 2)), 2,
-	              "expected table or string");
 
 	argstoaddrs(L, &pt);
 
@@ -291,7 +484,11 @@ pftablereplace(lua_State *L)
 
 /***
 Zero the per-address counters, leaving the addresses in place.
+
+With no argument every address of the table is zeroed. Naming addresses
+zeroes only those, as `pfctl -T zero address ...` does.
 @function table:clearaddrstats
+@param[opt] addresses a string, or an array of strings
 @treturn int addresses zeroed
 @raise if the ioctl fails
 */
@@ -299,12 +496,26 @@ static int
 pftableclearaddrstats(lua_State *L)
 {
 	struct luapftable *lpft = luaL_checkudata(L, 1, PFTABLE_MT);
-	struct luapf *pf = tablepf(L, lpft);
+	struct luapf *pf;
 	struct pfioc_table pt;
+	int named = !lua_isnoneornil(L, 2);
+
+	pf = tablepf(L, lpft);
 
 	memset(&pt, 0, sizeof(pt));
 	pt.pfrio_esize = sizeof(struct pfr_addr);
 	settablename(&pt, lpft->table);
+
+	if (named) {
+		argstoaddrs(L, &pt);
+	} else {
+		/*
+		 * The kernel zeroes only the addresses the request names, so
+		 * an empty buffer zeroes nothing at all. Read the table's own
+		 * addresses back and name every one of them.
+		 */
+		pt.pfrio_buffer = readaddrs(L, pf, lpft->table, &pt.pfrio_size);
+	}
 
 	if (ioctl(pf->fd, DIOCRCLRASTATS, &pt) < 0)
 		luaL_error(L, "DIOCRCLRASTATS: %s", strerror(errno));
@@ -479,12 +690,16 @@ argstoaddrs(lua_State *L, struct pfioc_table *pt)
 
 	pt->pfrio_esize = sizeof(struct pfr_addr);
 
-	luaL_argcheck(L, (lua_istable(L, 2) || lua_isstring(L, 2)), 2,
-	              "expected table or string");
+	/*
+	 * lua_isstring is also true of a number, and a number reaching
+	 * inet_net_pton turns 1 into 1.0.0.0/8, so insist on a string.
+	 */
+	luaL_argcheck(L, (lua_istable(L, 2) || lua_type(L, 2) == LUA_TSTRING),
+	              2, "expected table or string");
 
 	len = lua_rawlen(L, 2);
 
-	if (lua_isstring(L, 2)) {
+	if (lua_type(L, 2) == LUA_TSTRING) {
 		s = luaL_checkstring(L, 2);
 		luaL_argcheck(L, (len < INET6_ADDRSTRLEN), 2,
 		              "address too long");
@@ -504,7 +719,7 @@ argstoaddrs(lua_State *L, struct pfioc_table *pt)
 		memset(ap, 0, len * sizeof(*ap));
 		for (i = 0; i < len; i++) {
 			lua_rawgeti(L, 2, (lua_Integer)(i + 1));
-			luaL_argcheck(L, (lua_isstring(L, -1)), 2,
+			luaL_argcheck(L, (lua_type(L, -1) == LUA_TSTRING), 2,
 			              "table element not a string");
 			luaL_argcheck(L, (lua_rawlen(L, -1) < INET6_ADDRSTRLEN),
 			              2, "address too long");
@@ -520,9 +735,16 @@ argstoaddrs(lua_State *L, struct pfioc_table *pt)
 
 /***
 Add addresses to a table.
+
+opts takes dummy, which asks what the call would do and changes nothing,
+and feedback, which adds a second return value: one entry table per
+address given, whose fback says what happened to that address. The kernel
+does not answer in the order asked, so read the result by address.
 @function table:add
 @param addresses a string, or an array of strings
+@tparam[opt] table opts dummy and feedback
 @treturn int addresses added
+@treturn ?table per-address results, when feedback is asked for
 @raise if an address cannot be parsed
 @usage t:add({ "10.0.0.0/8", "192.168.0.1" })
 */
@@ -532,19 +754,17 @@ pftableadd(lua_State *L)
 	struct luapftable *lpft = luaL_checkudata(L, 1, PFTABLE_MT);
 	struct luapf *pf;
 	struct pfioc_table pt;
+	int feedback = optbool(L, 3, "feedback", 0);
+	int flags = dummyflag(L, 3);
 
-	lua_rawgeti(L, LUA_REGISTRYINDEX, lpft->luapfref);
-	pf = luaL_checkudata(L, -1, PF_MT);
+	if (feedback)
+		flags |= PFR_FLAG_FEEDBACK;
+
+	pf = tablepf(L, lpft);
 
 	memset(&pt, 0, sizeof(pt));
-
-	strlcpy(pt.pfrio_table.pfrt_anchor, lpft->table->pfrt_anchor,
-	        sizeof(pt.pfrio_table.pfrt_anchor));
-	strlcpy(pt.pfrio_table.pfrt_name, lpft->table->pfrt_name,
-	        sizeof(pt.pfrio_table.pfrt_name));
-
-	luaL_argcheck(L, (lua_istable(L, 2) || lua_isstring(L, 2)), 2,
-	              "expected table or string");
+	pt.pfrio_flags = flags;
+	settablename(&pt, lpft->table);
 
 	argstoaddrs(L, &pt);
 
@@ -553,14 +773,23 @@ pftableadd(lua_State *L)
 
 	lua_pushinteger(L, pt.pfrio_nadd);
 
-	return 1;
+	if (!feedback)
+		return 1;
+
+	pushentries(L, pt.pfrio_buffer, pt.pfrio_size);
+
+	return 2;
 }
 
 /***
 Delete addresses from a table.
+
+opts takes dummy and feedback, as add does.
 @function table:delete
 @param addresses a string, or an array of strings
+@tparam[opt] table opts dummy and feedback
 @treturn int addresses deleted
+@treturn ?table per-address results, when feedback is asked for
 @raise if an address cannot be parsed
 */
 static int
@@ -569,19 +798,17 @@ pftabledelete(lua_State *L)
 	struct luapftable *lpft = luaL_checkudata(L, 1, PFTABLE_MT);
 	struct luapf *pf;
 	struct pfioc_table pt;
+	int feedback = optbool(L, 3, "feedback", 0);
+	int flags = dummyflag(L, 3);
 
-	lua_rawgeti(L, LUA_REGISTRYINDEX, lpft->luapfref);
-	pf = luaL_checkudata(L, -1, PF_MT);
+	if (feedback)
+		flags |= PFR_FLAG_FEEDBACK;
+
+	pf = tablepf(L, lpft);
 
 	memset(&pt, 0, sizeof(pt));
-
-	strlcpy(pt.pfrio_table.pfrt_anchor, lpft->table->pfrt_anchor,
-	        sizeof(pt.pfrio_table.pfrt_anchor));
-	strlcpy(pt.pfrio_table.pfrt_name, lpft->table->pfrt_name,
-	        sizeof(pt.pfrio_table.pfrt_name));
-
-	luaL_argcheck(L, (lua_istable(L, 2) || lua_isstring(L, 2)), 2,
-	              "expected table or string");
+	pt.pfrio_flags = flags;
+	settablename(&pt, lpft->table);
 
 	argstoaddrs(L, &pt);
 
@@ -590,7 +817,12 @@ pftabledelete(lua_State *L)
 
 	lua_pushinteger(L, pt.pfrio_ndel);
 
-	return 1;
+	if (!feedback)
+		return 1;
+
+	pushentries(L, pt.pfrio_buffer, pt.pfrio_size);
+
+	return 2;
 }
 
 static int
@@ -719,6 +951,45 @@ table_bytes_out(lua_State *L, int idx)
 	return 1;
 }
 
+/*
+ * One getter per direction and op, since a property serves no context of
+ * its own. pfctl -vvsT prints these eight cells and never prints a sum;
+ * the summed properties above stay for callers that want one.
+ */
+#define TABLE_OP_PROPERTY(fn, field, dir, op)                                  \
+	static int fn(lua_State *L, int idx)                                   \
+	{                                                                      \
+		struct luapftable *lpft = luaL_checkudata(L, idx, PFTABLE_MT); \
+                                                                               \
+		lua_pushinteger(L, (lua_Integer)lpft->stats.field[dir][op]);   \
+                                                                               \
+		return 1;                                                      \
+	}
+
+TABLE_OP_PROPERTY(table_packets_in_block, pfrts_packets, PFR_DIR_IN,
+                  PFR_OP_BLOCK)
+TABLE_OP_PROPERTY(table_packets_in_match, pfrts_packets, PFR_DIR_IN,
+                  PFR_OP_MATCH)
+TABLE_OP_PROPERTY(table_packets_in_pass, pfrts_packets, PFR_DIR_IN, PFR_OP_PASS)
+TABLE_OP_PROPERTY(table_packets_in_xpass, pfrts_packets, PFR_DIR_IN,
+                  PFR_OP_XPASS)
+TABLE_OP_PROPERTY(table_packets_out_block, pfrts_packets, PFR_DIR_OUT,
+                  PFR_OP_BLOCK)
+TABLE_OP_PROPERTY(table_packets_out_match, pfrts_packets, PFR_DIR_OUT,
+                  PFR_OP_MATCH)
+TABLE_OP_PROPERTY(table_packets_out_pass, pfrts_packets, PFR_DIR_OUT,
+                  PFR_OP_PASS)
+TABLE_OP_PROPERTY(table_packets_out_xpass, pfrts_packets, PFR_DIR_OUT,
+                  PFR_OP_XPASS)
+TABLE_OP_PROPERTY(table_bytes_in_block, pfrts_bytes, PFR_DIR_IN, PFR_OP_BLOCK)
+TABLE_OP_PROPERTY(table_bytes_in_match, pfrts_bytes, PFR_DIR_IN, PFR_OP_MATCH)
+TABLE_OP_PROPERTY(table_bytes_in_pass, pfrts_bytes, PFR_DIR_IN, PFR_OP_PASS)
+TABLE_OP_PROPERTY(table_bytes_in_xpass, pfrts_bytes, PFR_DIR_IN, PFR_OP_XPASS)
+TABLE_OP_PROPERTY(table_bytes_out_block, pfrts_bytes, PFR_DIR_OUT, PFR_OP_BLOCK)
+TABLE_OP_PROPERTY(table_bytes_out_match, pfrts_bytes, PFR_DIR_OUT, PFR_OP_MATCH)
+TABLE_OP_PROPERTY(table_bytes_out_pass, pfrts_bytes, PFR_DIR_OUT, PFR_OP_PASS)
+TABLE_OP_PROPERTY(table_bytes_out_xpass, pfrts_bytes, PFR_DIR_OUT, PFR_OP_XPASS)
+
 static int
 table_match(lua_State *L, int idx)
 {
@@ -782,26 +1053,42 @@ table_refcnt_anchor(lua_State *L, int idx)
 }
 
 static const struct ro_property table_properties[] = {
-    {"anchor",          table_anchor         },
-    {"name",            table_name           },
-    {"persist",         table_persist        },
-    {"const",           table_const          },
-    {"active",          table_active         },
-    {"inactive",        table_inactive       },
-    {"referenced",      table_referenced     },
-    {"refdanchor",      table_refdanchor     },
-    {"counters",        table_counters       },
-    {"addresses_count", table_addresses_count},
-    {"match",           table_match          },
-    {"nomatch",         table_nomatch        },
-    {"packets_in",      table_packets_in     },
-    {"packets_out",     table_packets_out    },
-    {"bytes_in",        table_bytes_in       },
-    {"bytes_out",       table_bytes_out      },
-    {"cleared",         table_cleared        },
-    {"refcnt_rule",     table_refcnt_rule    },
-    {"refcnt_anchor",   table_refcnt_anchor  },
-    {NULL,              NULL                 },
+    {"anchor",            table_anchor           },
+    {"name",              table_name             },
+    {"persist",           table_persist          },
+    {"const",             table_const            },
+    {"active",            table_active           },
+    {"inactive",          table_inactive         },
+    {"referenced",        table_referenced       },
+    {"refdanchor",        table_refdanchor       },
+    {"counters",          table_counters         },
+    {"addresses_count",   table_addresses_count  },
+    {"match",             table_match            },
+    {"nomatch",           table_nomatch          },
+    {"packets_in",        table_packets_in       },
+    {"packets_out",       table_packets_out      },
+    {"bytes_in",          table_bytes_in         },
+    {"bytes_out",         table_bytes_out        },
+    {"packets_in_block",  table_packets_in_block },
+    {"packets_in_match",  table_packets_in_match },
+    {"packets_in_pass",   table_packets_in_pass  },
+    {"packets_in_xpass",  table_packets_in_xpass },
+    {"packets_out_block", table_packets_out_block},
+    {"packets_out_match", table_packets_out_match},
+    {"packets_out_pass",  table_packets_out_pass },
+    {"packets_out_xpass", table_packets_out_xpass},
+    {"bytes_in_block",    table_bytes_in_block   },
+    {"bytes_in_match",    table_bytes_in_match   },
+    {"bytes_in_pass",     table_bytes_in_pass    },
+    {"bytes_in_xpass",    table_bytes_in_xpass   },
+    {"bytes_out_block",   table_bytes_out_block  },
+    {"bytes_out_match",   table_bytes_out_match  },
+    {"bytes_out_pass",    table_bytes_out_pass   },
+    {"bytes_out_xpass",   table_bytes_out_xpass  },
+    {"cleared",           table_cleared          },
+    {"refcnt_rule",       table_refcnt_rule      },
+    {"refcnt_anchor",     table_refcnt_anchor    },
+    {NULL,                NULL                   },
 };
 
 static int
@@ -861,16 +1148,21 @@ pftablegc(lua_State *L)
 }
 
 /***
-List the active tables.
+List the active tables of one ruleset.
+
+The default is the main ruleset. An anchor name lists that anchor
+instead, and "*", as pfctl spells it, lists every ruleset at once.
 @function pf:tables
+@string[opt=""] anchor
 @treturn table array of table objects
 @raise if the ioctl fails
-@usage for _, t in ipairs(h:tables()) do print(t.name, #t) end
+@usage for _, t in ipairs(h:tables("*")) do print(t.anchor, t.name) end
 */
 int
 pftables(lua_State *L)
 {
 	struct luapf *pf = luaL_checkudata(L, 1, PF_MT);
+	const char *anchor = luaL_optstring(L, 2, "");
 	struct pfioc_table pt;
 	struct pfr_tstats *tables, *t;
 	struct luapftable *lpft;
@@ -879,6 +1171,13 @@ pftables(lua_State *L)
 	memset(&pt, 0, sizeof(pt));
 
 	pt.pfrio_esize = sizeof(struct pfr_tstats);
+
+	if (strcmp(anchor, "*") == 0)
+		pt.pfrio_flags = PFR_FLAG_ALLRSETS;
+	else if (strlcpy(pt.pfrio_table.pfrt_anchor, anchor,
+	                 sizeof(pt.pfrio_table.pfrt_anchor)) >=
+	         sizeof(pt.pfrio_table.pfrt_anchor))
+		luaL_error(L, "anchor name too long");
 
 	if (ioctl(pf->fd, DIOCRGETTSTATS, &pt) < 0)
 		luaL_error(L, "DIOCRGETTSTATS: %s", strerror(errno));
@@ -1049,7 +1348,7 @@ pftablerefresh(lua_State *L)
 }
 
 static void
-argstotables(lua_State *L, struct pfioc_table *pt)
+argstotables(lua_State *L, struct pfioc_table *pt, int tflags)
 {
 	const char *s;
 	size_t len, i;
@@ -1057,12 +1356,17 @@ argstotables(lua_State *L, struct pfioc_table *pt)
 
 	pt->pfrio_esize = sizeof(struct pfr_table);
 
-	luaL_argcheck(L, (lua_istable(L, 2) || lua_isstring(L, 2)), 2,
-	              "expected table or string");
+	/*
+	 * lua_isstring is also true of a number, and a number reaching this
+	 * unchecked is how a table named 42 gets created, so insist on a
+	 * string.
+	 */
+	luaL_argcheck(L, (lua_istable(L, 2) || lua_type(L, 2) == LUA_TSTRING),
+	              2, "expected table or string");
 
 	len = lua_rawlen(L, 2);
 
-	if (lua_isstring(L, 2)) {
+	if (lua_type(L, 2) == LUA_TSTRING) {
 		s = luaL_checkstring(L, 2);
 		luaL_argcheck(L, (len < PATH_MAX), 2, "table name too long");
 
@@ -1070,6 +1374,7 @@ argstotables(lua_State *L, struct pfioc_table *pt)
 		memset(tp, 0, sizeof(*tp));
 
 		strtotable(L, s, tp);
+		tp->pfrt_flags = (u_int32_t)tflags;
 		pt->pfrio_buffer = tp;
 		pt->pfrio_size = 1;
 	} else {
@@ -1081,12 +1386,13 @@ argstotables(lua_State *L, struct pfioc_table *pt)
 		memset(tp, 0, len * sizeof(*tp));
 		for (i = 0; i < len; i++) {
 			lua_rawgeti(L, 2, (lua_Integer)(i + 1));
-			luaL_argcheck(L, (lua_isstring(L, -1)), 2,
+			luaL_argcheck(L, (lua_type(L, -1) == LUA_TSTRING), 2,
 			              "table element not a string");
 			luaL_argcheck(L, (lua_rawlen(L, -1) < PATH_MAX), 2,
 			              "table name too long");
 			s = lua_tostring(L, -1);
 			strtotable(L, s, &tp[i]);
+			tp[i].pfrt_flags = (u_int32_t)tflags;
 			lua_pop(L, 1);
 		}
 
@@ -1097,14 +1403,11 @@ argstotables(lua_State *L, struct pfioc_table *pt)
 
 static void
 multitableop(lua_State *L, struct pfioc_table *pt, unsigned long op,
-             const char *label)
+             const char *label, int tflags)
 {
 	struct luapf *pf = luaL_checkudata(L, 1, PF_MT);
 
-	luaL_argcheck(L, (lua_istable(L, 2) || lua_isstring(L, 2)), 2,
-	              "expected table or string");
-
-	argstotables(L, pt);
+	argstotables(L, pt, tflags);
 
 	if (ioctl(pf->fd, op, pt) < 0)
 		luaL_error(L, "%s: %s", label, strerror(errno));
@@ -1112,25 +1415,44 @@ multitableop(lua_State *L, struct pfioc_table *pt, unsigned long op,
 
 /***
 Create tables.
+
+The new table is persistent unless opts says otherwise, which is what
+pfctl asks for: a table that is only active is dropped again as soon as
+nothing refers to it, and its own first flag change is enough to do that.
+opts also takes const, and dummy, which asks what the call would do and
+creates nothing.
 @function pf:addtables
 @param names a string, or an array of strings
+@tparam[opt] table opts persist, defaulting to true, plus const and dummy
 @treturn int tables created
 @raise if the ioctl fails
+@usage h:addtables("badboys", { const = true })
 */
 int
 pfaddtables(lua_State *L)
 {
 	struct pfioc_table pt;
+	int tflags = 0;
+
+	if (optbool(L, 3, "persist", 1))
+		tflags |= PFR_TFLAG_PERSIST;
+	if (optbool(L, 3, "const", 0))
+		tflags |= PFR_TFLAG_CONST;
 
 	memset(&pt, 0, sizeof(pt));
-	multitableop(L, &pt, DIOCRADDTABLES, "DIOCRADDTABLES");
+	pt.pfrio_flags = dummyflag(L, 3);
+	multitableop(L, &pt, DIOCRADDTABLES, "DIOCRADDTABLES", tflags);
 	lua_pushinteger(L, pt.pfrio_nadd);
 
 	return 1;
 }
 
 /***
-Zero the counters of tables, leaving their addresses in place.
+Zero the counters of tables, and of their addresses.
+
+The addresses themselves stay. This is `pfctl -T zero` with no address
+argument: the kernel recurses into the per-address counters, so the two
+halves cannot come apart.
 @function pf:cleartables
 @param names a string, or an array of strings
 @treturn int tables zeroed
@@ -1142,7 +1464,8 @@ pfcleartables(lua_State *L)
 	struct pfioc_table pt;
 
 	memset(&pt, 0, sizeof(pt));
-	multitableop(L, &pt, DIOCRCLRTSTATS, "DIOCRCLRTSTATS");
+	pt.pfrio_flags = PFR_FLAG_ADDRSTOO;
+	multitableop(L, &pt, DIOCRCLRTSTATS, "DIOCRCLRTSTATS", 0);
 	lua_pushinteger(L, pt.pfrio_nzero);
 
 	return 1;
@@ -1181,6 +1504,8 @@ pfclearalltables(lua_State *L)
 Delete tables by name.
 @function pf:deletetables
 @param names a string, or an array of strings
+@tparam[opt] table opts dummy asks what the call would do and deletes
+nothing
 @treturn int tables deleted
 @raise if the ioctl fails
 */
@@ -1190,7 +1515,8 @@ pfdeletetables(lua_State *L)
 	struct pfioc_table pt;
 
 	memset(&pt, 0, sizeof(pt));
-	multitableop(L, &pt, DIOCRDELTABLES, "DIOCRDELTABLES");
+	pt.pfrio_flags = dummyflag(L, 3);
+	multitableop(L, &pt, DIOCRDELTABLES, "DIOCRDELTABLES", 0);
 	lua_pushinteger(L, pt.pfrio_ndel);
 
 	return 1;
@@ -1210,7 +1536,18 @@ A single table, as tables and gettable return it.
 Read-only properties: name, anchor, persist, const, active, inactive,
 referenced, refdanchor, counters, addresses_count, match, nomatch,
 packets_in, packets_out, bytes_in, bytes_out, cleared, refcnt_rule and
-refcnt_anchor. All of them are a snapshot; refresh re-reads them. The
-length operator returns the address count.
+refcnt_anchor.
+
+The kernel counts packets and bytes per direction and per op, and
+packets_in, packets_out, bytes_in and bytes_out are sums over the four
+ops. The cells themselves are packets_in_block, packets_in_match,
+packets_in_pass, packets_in_xpass, packets_out_block, packets_out_match,
+packets_out_pass, packets_out_xpass and the eight bytes_ properties
+spelled the same way. An address keeps three ops rather than four, so a
+table sum and the sum of its addresses only agree while the xpass cells
+are zero.
+
+All of them are a snapshot; refresh re-reads them. The length operator
+returns the address count.
 @table tableobject
 */

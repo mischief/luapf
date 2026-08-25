@@ -28,6 +28,10 @@ assert(found)
 
 local t1 = handle:gettable("test1")
 assert(t1)
+-- addtables asks for a persistent table, as pfctl's table creation always
+-- does: a table that is only active is dropped again as soon as nothing
+-- refers to it, and its own first flag change is enough to do that.
+assert(t1.persist == true, "addtables did not ask for persist")
 
 t1:add("127.0.0.0/8")
 assert(t1:test("127.0.0.1") == true)
@@ -58,9 +62,40 @@ for _, address in ipairs(addresses) do
 	assert(type(address) == "string")
 end
 
+-- entries is the same list with every field of struct pfr_addr.
+local entrykeys = {
+	"address", "negated", "ifname", "states", "weight", "type", "af",
+	"fback",
+}
+local entries = t1:entries()
+assert(#entries == 4)
+for i, e in ipairs(entries) do
+	assert(e.address == addresses[i])
+	assert(e.negated == false)
+	assert(e.ifname == "")
+	assert(e.states == 0 and e.weight == 0)
+	assert(e.type == "plain")
+	assert(e.af == "inet")
+	assert(e.fback == "none")
+	local keys = {}
+	for k in pairs(e) do
+		keys[k] = true
+	end
+	for _, name in ipairs(entrykeys) do
+		assert(keys[name], "entries did not offer " .. name)
+		keys[name] = nil
+	end
+	assert(next(keys) == nil, "entries offered an unknown key")
+end
+
+-- Without the counters flag the kernel allocates no counter block at all,
+-- and fback says so. A row of zeroes would not tell the two apart.
+for _, a in ipairs(t1:addrstats()) do
+	assert(a.fback == "nocount", "no counters, but fback is " .. a.fback)
+end
+
 assert(t1.counters == false)
--- a table that is neither persistent nor referenced is dropped when its
--- flags change, so keep it alive
+-- persist is already on, so this changes counters and nothing else.
 assert(t1:setflags({ counters = true, persist = true }) == 1)
 t1:refresh()
 assert(t1.counters == true)
@@ -76,6 +111,12 @@ for _, name in ipairs({
 	"referenced", "refdanchor", "counters", "addresses_count",
 	"match", "nomatch", "packets_in", "packets_out", "bytes_in",
 	"bytes_out", "cleared", "refcnt_rule", "refcnt_anchor",
+	"packets_in_block", "packets_in_match", "packets_in_pass",
+	"packets_in_xpass", "packets_out_block", "packets_out_match",
+	"packets_out_pass", "packets_out_xpass",
+	"bytes_in_block", "bytes_in_match", "bytes_in_pass",
+	"bytes_in_xpass", "bytes_out_block", "bytes_out_match",
+	"bytes_out_pass", "bytes_out_xpass",
 }) do
 	assert(props[name], "pairs did not offer " .. name)
 	props[name] = nil
@@ -95,6 +136,27 @@ assert(t1.packets_in == 0 and t1.packets_out == 0)
 assert(t1.bytes_in == 0 and t1.bytes_out == 0)
 assert(t1.cleared > 0 and t1.cleared <= os.time())
 
+-- Nothing has been counted yet, so every op cell of the table reads zero.
+for _, name in ipairs({
+	"packets_in_block", "packets_in_match", "packets_in_pass",
+	"packets_in_xpass", "packets_out_block", "packets_out_match",
+	"packets_out_pass", "packets_out_xpass",
+	"bytes_in_block", "bytes_in_match", "bytes_in_pass",
+	"bytes_in_xpass", "bytes_out_block", "bytes_out_match",
+	"bytes_out_pass", "bytes_out_xpass",
+}) do
+	assert(t1[name] == 0, name .. " is not zero")
+end
+
+-- An address stats entry is an entries entry plus the counters. The
+-- kernel keeps three ops per address, not the four it keeps per table.
+local addrstatkeys = {
+	"packets_in", "packets_out", "bytes_in", "bytes_out", "cleared",
+	"packets_in_block", "packets_in_match", "packets_in_pass",
+	"packets_out_block", "packets_out_match", "packets_out_pass",
+	"bytes_in_block", "bytes_in_match", "bytes_in_pass",
+	"bytes_out_block", "bytes_out_match", "bytes_out_pass",
+}
 local stats = t1:addrstats()
 assert(#stats == 4)
 for _, a in ipairs(stats) do
@@ -103,6 +165,23 @@ for _, a in ipairs(stats) do
 	assert(a.bytes_in == 0 and a.bytes_out == 0)
 	assert(type(a.cleared) == "number")
 	assert(a.cleared > 0 and a.cleared <= os.time())
+	assert(a.negated == false and a.type == "plain")
+	assert(a.af == "inet" and a.ifname == "")
+	assert(a.packets_in_xpass == nil and a.bytes_out_xpass == nil,
+	    "an address grew a fourth op")
+	local keys = {}
+	for k in pairs(a) do
+		keys[k] = true
+	end
+	for _, name in ipairs(entrykeys) do
+		assert(keys[name], "addrstats did not offer " .. name)
+		keys[name] = nil
+	end
+	for _, name in ipairs(addrstatkeys) do
+		assert(keys[name], "addrstats did not offer " .. name)
+		keys[name] = nil
+	end
+	assert(next(keys) == nil, "addrstats offered an unknown key")
 end
 
 -- replace swaps the whole content in one step
@@ -116,17 +195,24 @@ assert(#t1 == 2)
 assert(t1:test("127.0.0.10") == true)
 assert(t1:test("127.0.0.1") == false)
 
--- The count is addresses zeroed. DIOCRCLRASTATS zeroes the addresses the
--- caller names in the request buffer, and the binding sends an empty one,
--- so today the call reaches the kernel, names nothing and reports nothing.
--- Fixing the binding to send the table's addresses turns this into 2.
-assert(t1:clearaddrstats() == 0)
+-- The count is addresses zeroed, and with no argument that is every
+-- address the table holds.
+assert(t1:clearaddrstats() == 2)
+-- Naming addresses zeroes only those.
+assert(t1:clearaddrstats("127.0.0.10") == 1)
+assert(t1:clearaddrstats({ "127.0.0.10", "127.0.0.11" }) == 2)
 
--- IPv6 entries use the same address API.
+-- IPv6 entries use the same address API, and an entry says which family
+-- it belongs to.
 t1:add("::1")
 t1:refresh()
 assert(t1:test("::1") == true)
 assert(#t1 == 3)
+local families = {}
+for _, e in ipairs(t1:entries()) do
+	families[e.af] = (families[e.af] or 0) + 1
+end
+assert(families.inet == 2 and families.inet6 == 1)
 
 -- A name that does not exist in an anchor that does is a nil return. An
 -- anchor that does not exist is not: DIOCRGETTSTATS fails with ENOENT and
@@ -137,12 +223,55 @@ assert(not pcall(function()
 	return handle:gettable("luapfnoanchor/luapfnosuchtable")
 end))
 
+-- dummy asks the kernel what the call would do and changes nothing.
+local before = #t1
+assert(t1:add("127.0.0.99", { dummy = true }) == 1)
+t1:refresh()
+assert(#t1 == before, "a dummy add changed the table")
+assert(handle:addtables("luapfdummytable", { dummy = true }) == 1)
+assert(handle:gettable("luapfdummytable") == nil,
+    "a dummy addtables created a table")
+
+-- feedback says what happened to each address given. The kernel does not
+-- answer in the order asked, so read the result by address.
+local n, fb = t1:add({ "127.0.0.10", "127.0.0.99" }, { feedback = true })
+assert(n == 1)
+assert(#fb == 2)
+local byfb = {}
+for _, e in ipairs(fb) do
+	byfb[e.address] = e.fback
+end
+assert(byfb["127.0.0.10"] == "none", "an address already held came back " ..
+    byfb["127.0.0.10"])
+assert(byfb["127.0.0.99"] == "added", "a new address came back " ..
+    byfb["127.0.0.99"])
+local dn, dfb = t1:delete("127.0.0.99", { feedback = true })
+assert(dn == 1 and dfb[1].fback == "deleted")
+assert(t1:delete("127.0.0.99", { dummy = true }) == 0)
+
 -- Bad arguments are rejected before any ioctl runs.
 assert(not pcall(function() return t1:add("not-an-address") end))
 assert(not pcall(function() return t1:add({ {} }) end))
 assert(not pcall(function() return t1:add(("1"):rep(60)) end))
 assert(not pcall(function() return t1:setflags("persist") end))
 assert(not pcall(function() return handle:addtables({ {} }) end))
+-- lua_isstring is true of a number too, so an unchecked binding creates a
+-- table named 42 and reads 1 as the address 1.0.0.0/8.
+assert(not pcall(function() return handle:addtables(42) end))
+assert(not pcall(function() return handle:addtables({ 42 }) end))
+assert(not pcall(function() return handle:deletetables(42) end))
+assert(not pcall(function() return handle:cleartables(42) end))
+assert(not pcall(function() return t1:add(1) end))
+assert(not pcall(function() return t1:add({ 1 }) end))
+assert(not pcall(function() return t1:delete(1) end))
+assert(not pcall(function() return t1:replace(1) end))
+assert(handle:gettable("42") == nil, "a table named 42 was created")
+
+-- The anchor argument of pf:tables picks a ruleset, and "*" is all of
+-- them, so it can only be a superset of the main ruleset's tables.
+assert(#handle:tables("*") >= #handle:tables())
+assert(not pcall(function() return handle:tables("luapfnoanchor") end))
+assert(not pcall(function() return handle:tables(("a"):rep(2000)) end))
 -- DIOCRTSTADDRS takes a host, so a prefix is an error rather than false.
 assert(not pcall(function() return t1:test("127.0.0.0/8") end))
 
@@ -226,6 +355,8 @@ loadrules([[
 set skip on lo
 table <hit> persist counters { 10.99.0.2 }
 table <miss> persist counters { 10.99.0.9 }
+table <negs> persist { 10.99.0.0/24, !10.99.0.7 }
+table <costs> persist { 10.99.0.3 weight 10 }
 pass log
 anchor "audit" on tun0
 block out log on tun0 inet proto udp to <miss>
@@ -285,16 +416,64 @@ assert(shadow.active == false, "the shadow is active")
 assert(not pcall(function() return shadow:addrstats() end))
 assert(not pcall(function() return shadow:addresses() end))
 
+-- pf:tables asks the kernel for one ruleset. "*" asks for every one at
+-- once, which is the only way to reach an anchor's tables without naming
+-- them, and an anchor name asks for just that anchor.
+local sawinner = false
+for _, t in ipairs(handle:tables("*")) do
+	if t.anchor == "audit" and t.name == "inner" then
+		sawinner = true
+	end
+end
+assert(sawinner, "pf:tables(\"*\") missed the anchor's table")
+local anchored = handle:tables("audit")
+assert(#anchored == 1 and anchored[1].name == "inner",
+    "pf:tables(\"audit\") listed " .. #anchored .. " tables")
+
+-- A negated entry carries the ! of pf.conf, and without that field it is
+-- indistinguishable from an ordinary one.
+local negs = assert(handle:gettable("negs"))
+local byaddr = {}
+for _, e in ipairs(negs:entries()) do
+	byaddr[e.address] = e
+end
+assert(byaddr["10.99.0.0/24"], "<negs> lost its network entry")
+assert(byaddr["10.99.0.0/24"].negated == false)
+assert(byaddr["10.99.0.7"], "<negs> lost its negated entry")
+assert(byaddr["10.99.0.7"].negated == true,
+    "a ! entry looks like an ordinary one")
+-- The kernel agrees: the negated address is the hole in the network.
+assert(negs:test("10.99.0.8") == true)
+assert(negs:test("10.99.0.7") == false)
+
+-- <negs> carries no counters flag, so the kernel allocated no counter
+-- block for its addresses at all. fback says which of the two a row of
+-- zeroes is.
+for _, a in ipairs(negs:addrstats()) do
+	assert(a.fback == "nocount", "no counters, but fback is " .. a.fback)
+end
+
+-- A weight makes a cost entry rather than a plain one.
+local costs = assert(handle:gettable("costs"))
+local cost = costs:entries()[1]
+assert(cost.address == "10.99.0.3")
+assert(cost.type == "cost", "a weighted entry is type " .. cost.type)
+assert(cost.weight == 10, "weight came back " .. cost.weight)
+assert(cost.states == 0)
+
 -- Outbound: the pass rule wins, so <hit> counts a match and a packet out.
 -- The block rule ahead of it looks <miss> up and does not match.
-sh("echo probe | nc -u -w 1 10.99.0.2 9999")
-
 -- Inbound: the source address is what the winning rule looks up, so the
 -- same table counts in the other direction.
-tun:write(string.pack(">I4", 2) ..
-    udp4("10.99.0.2", 40000, "10.99.0.1", 9999, "inprobe"))
-tun:flush()
-os.execute("sleep 1")
+local function probe()
+	sh("echo probe | nc -u -w 1 10.99.0.2 9999")
+	tun:write(string.pack(">I4", 2) ..
+	    udp4("10.99.0.2", 40000, "10.99.0.1", 9999, "inprobe"))
+	tun:flush()
+	os.execute("sleep 1")
+end
+
+probe()
 
 hit:refresh()
 miss:refresh()
@@ -308,6 +487,26 @@ assert(hit.bytes_out >= hit.packets_out * 28,
     "<hit> outbound bytes are short for the packet count")
 assert(hit.bytes_in >= hit.packets_in * 28,
     "<hit> inbound bytes are short for the packet count")
+
+-- pfctl -vvsT prints these eight cells and never prints a sum. Only pass
+-- rules look <hit> up, so every packet lands in the pass cell and the
+-- sums are those cells added up.
+assert(hit.packets_out_pass == hit.packets_out,
+    "out/pass holds " .. hit.packets_out_pass .. " of " .. hit.packets_out)
+assert(hit.packets_in_pass == hit.packets_in,
+    "in/pass holds " .. hit.packets_in_pass .. " of " .. hit.packets_in)
+assert(hit.bytes_out_pass == hit.bytes_out)
+assert(hit.bytes_in_pass == hit.bytes_in)
+assert(hit.packets_in_block == 0 and hit.packets_out_block == 0)
+assert(hit.packets_in_match == 0 and hit.packets_out_match == 0)
+assert(hit.bytes_in_block == 0 and hit.bytes_out_block == 0)
+assert(hit.bytes_in_match == 0 and hit.bytes_out_match == 0)
+-- XPASS counts a stateful packet that no longer matches the table, and
+-- nothing here empties a table mid-flow. It is also the op an address
+-- does not keep, so a table sum and its addresses' only agree here
+-- because these two cells are zero.
+assert(hit.packets_in_xpass == 0 and hit.packets_out_xpass == 0)
+assert(hit.bytes_in_xpass == 0 and hit.bytes_out_xpass == 0)
 
 assert(miss.nomatch >= 1, "<miss> counted no nomatch")
 assert(miss.match == 0, "<miss> matched an address it does not hold")
@@ -328,6 +527,33 @@ assert(a.packets_in == hit.packets_in,
     "address packets in " .. a.packets_in .. " but table " .. hit.packets_in)
 assert(a.bytes_out == hit.bytes_out and a.bytes_in == hit.bytes_in,
     "address byte counters do not add up to the table's")
+assert(a.packets_out_pass == a.packets_out and a.bytes_out_pass ==
+    a.bytes_out)
+assert(a.packets_in_pass == a.packets_in and a.bytes_in_pass == a.bytes_in)
+assert(a.packets_in_block == 0 and a.packets_in_match == 0)
+assert(a.packets_out_block == 0 and a.packets_out_match == 0)
+assert(a.fback == "none", "a counted address came back " .. a.fback)
+assert(a.negated == false and a.type == "plain" and a.af == "inet")
+
+-- clearaddrstats names every address of the table by default, so the
+-- per-address counters go and the table's own stay.
+local hitmatch = hit.match
+assert(hit:clearaddrstats() == 1)
+hit:refresh()
+assert(#hit == 1, "clearaddrstats removed an address")
+assert(hit:addrstats()[1].packets_out == 0,
+    "clearaddrstats left a per-address counter behind")
+assert(hit:addrstats()[1].packets_in == 0)
+assert(hit.match == hitmatch, "clearaddrstats zeroed the table's counters")
+
+-- Naming addresses zeroes only those, as `pfctl -T zero address` does.
+assert(miss:clearaddrstats("10.99.0.9") == 1)
+
+-- Count again, so cleartables has per-address counters to recurse into.
+assert(handle:clearstates() >= 0)
+probe()
+hit:refresh()
+assert(hit:addrstats()[1].packets_out >= 1, "the second probe counted nothing")
 
 -- <miss> holds an address no packet ever reached, so its per-address
 -- counters stay at zero while its nomatch count does not.
@@ -336,48 +562,55 @@ assert(#mstats == 1 and mstats[1].address == "10.99.0.9")
 assert(mstats[1].packets_in == 0 and mstats[1].packets_out == 0)
 assert(mstats[1].bytes_in == 0 and mstats[1].bytes_out == 0)
 
--- cleartables zeroes the table's own counters only. The kernel has a flag
--- for recursing into the addresses, the binding does not pass it, and so
--- the per-address counters are still there afterwards. `pfctl -T zero`
--- does ask for the recursion, so the two do not agree.
+-- cleartables is `pfctl -T zero` with no address argument: the kernel
+-- recurses into the addresses, so the table's counters and its addresses'
+-- cannot come apart.
 local tzero = hit.cleared
-local addrpackets = a.packets_out
-assert(addrpackets >= 1)
 assert(handle:cleartables("hit") == 1)
 hit:refresh()
 assert(hit.match == 0 and hit.nomatch == 0)
 assert(hit.packets_in == 0 and hit.packets_out == 0)
 assert(hit.bytes_in == 0 and hit.bytes_out == 0)
+assert(hit.packets_out_pass == 0 and hit.packets_in_pass == 0)
 assert(hit.cleared >= tzero, "cleartables did not move the cleared time")
-assert(hit:addrstats()[1].packets_out == addrpackets,
-    "cleartables zeroed the per-address counters too")
-
--- clearaddrstats should be the other half, and it is not. DIOCRCLRASTATS
--- zeroes the addresses named in the request buffer, and the binding sends
--- an empty one, so the call names nothing, reports nothing zeroed and
--- leaves the counters that survived cleartables in place.
-assert(hit:clearaddrstats() == 0)
-hit:refresh()
-assert(hit:addrstats()[1].packets_out == addrpackets,
-    "clearaddrstats zeroed an address it never named")
+assert(hit:addrstats()[1].packets_out == 0,
+    "cleartables left the per-address counters alone")
+assert(#hit == 1, "cleartables removed an address")
 
 assert(handle:cleartables({ "hit", "miss" }) == 2)
 assert(handle:cleartables("luapfnosuchtable") == 0)
 
--- A table lua creates is active but not persistent, which is why the
--- native part above sets persist before it changes any other flag.
--- pfctl -T add differs here: it always asks for a persistent table.
+-- A table lua creates is persistent, as pfctl's is: an active table that
+-- nothing refers to is dropped again, and its own first flag change is
+-- enough to do that.
 assert(handle:addtables("scratch") == 1)
 local scratch = assert(handle:gettable("scratch"))
 assert(scratch.active == true)
-assert(scratch.persist == false, "addtables asked for persist")
+assert(scratch.persist == true, "addtables did not ask for persist")
 assert(scratch.counters == false and scratch.const == false)
 assert(scratch.referenced == false and scratch.refcnt_rule == 0)
-assert(#scratch == 0 and #scratch:addrstats() == 0)
+assert(#scratch == 0 and #scratch:addrstats() == 0 and #scratch:entries() == 0)
+
+-- The caller can ask for const at creation, as pf.conf can.
+assert(handle:addtables("frozen", { const = true }) == 1)
+local frozen = assert(handle:gettable("frozen"))
+assert(frozen.const == true and frozen.persist == true)
+assert(not pcall(function() return frozen:add("10.99.0.30") end),
+    "a table created const accepted an address")
+assert(frozen:setflags({ const = false }) == 1)
+assert(handle:deletetables("frozen") == 1)
+-- persist can be turned off at creation too, and then the table goes as
+-- soon as its flags change.
+assert(handle:addtables("fleeting", { persist = false }) == 1)
+local fleeting = assert(handle:gettable("fleeting"))
+assert(fleeting.persist == false, "persist = false still asked for persist")
+assert(fleeting:setflags({ counters = true }) == 1)
+assert(handle:gettable("fleeting") == nil,
+    "a table with no persist survived its own flag change")
 
 -- const rejects content changes, and setflags clears a flag as well as it
--- sets one. persist comes first so the table survives its own flag change.
-assert(scratch:setflags({ persist = true }) == 1)
+-- sets one. persist is already on, so asking for it again changes nothing.
+assert(scratch:setflags({ persist = true }) == 0)
 assert(scratch:add({ "10.99.0.20", "10.99.0.21" }) == 2)
 assert(scratch:setflags({ const = true }) == 1)
 scratch:refresh()
