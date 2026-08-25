@@ -37,8 +37,8 @@
 selfdir=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$selfdir/.." && pwd)
 stage=${1:-"$root/build/autoinstall-httpd"}
-release_rd=${2:-/home/mischief/vmd/luapf/bsd.rd-7.9}
-disk=${3:-/home/mischief/vmd/luapf/luapf-pf-test-base.qcow2}
+release_rd=${2:-"$root/build/autoinstall-httpd/pub/OpenBSD/7.9/amd64/bsd.rd"}
+disk=${3:-"$root/.vm/luapf-pf-test-base.qcow2"}
 name=${4:-luapf-pf-test-bootstrap}
 port=80
 timeout=${LUAPF_VM_BOOTSTRAP_TIMEOUT:-1800}
@@ -103,6 +103,16 @@ mkdir -p "$setdir"
 install -m 644 "$site_src/install.conf" "$stage/install.conf"
 install -m 644 "$site_src/luapf-root-only.disklabel" "$stage/luapf-root-only.disklabel"
 tar -C "$site_src" -czf "$setdir/site79.tgz" install.site
+# site sets are intentionally not part of the signed release SHA256 file.
+# Advertise the local set through index.txt so install.sub includes it in the
+# selectable file list.  Keep this idempotent: fetch_release_sets.sh (and a
+# failed build retried by hand) may leave an old listing behind, and ls(1)
+# must run in the set directory so index.txt contains a basename, not the
+# host-side path that install.sub cannot match.
+index_tmp=$(mktemp "$setdir/index.txt.XXXXXXXX")
+awk '$NF != "site79.tgz"' "$setdir/index.txt" >"$index_tmp"
+(cd "$setdir" && ls -lT site79.tgz) >>"$index_tmp"
+mv "$index_tmp" "$setdir/index.txt"
 
 # The builder has one fixed target VM/disk and listener; reject concurrent
 # invocations before creating or removing any generated resource.
@@ -138,29 +148,44 @@ vm_started=true
 tty=$(doas vmctl status -r | awk -v name="$name" '$NF == name {print $6}')
 [[ -n $tty && -c /dev/$tty ]] || fail "cannot discover serial tty for $name"
 tty=/dev/$tty
+transcript=${LUAPF_VM_TRANSCRIPT:-"$root/.vm/$name-console.log"}
+mkdir -p "${transcript%/*}"
+: >"$transcript"
 
-# The installer fetches its response file, sets, and reboots into the
-# installed system entirely on its own (see the file header comment).
-# Everything from here on drives that installed system's console directly,
-# the same way run_pf_vm_tests.sh drives a disposable test overlay: one
-# lua5.4 process owns the tty from first login through shutdown, because a
-# second opener of the same vmd tty steals bytes the first is waiting for.
+# The installer fetches the response file, installs the sets, and then powers
+# down the installer VM (see the file header comment).  The host explicitly
+# starts a second VM from the installed disk before package provisioning.
+# Each phase gets its own console connection because the first VM terminates
+# rather than resetting through BIOS when the guest requests a reboot.
 driver=$(mktemp)
 cat >"$driver" <<'LUAEOF'
 package.path = arg[1] .. "/?.lua;" .. package.path
 local console = require("luapf_console")
 
-local tty, password = arg[2], arg[3]
+local tty, password, transcript_path, mode = arg[2], arg[3], arg[4], arg[5]
 
-local c, err = console.open(tty, 115200)
+local c, err = console.open(tty, 115200, transcript_path)
 if not c then
 	io.stderr:write("build-test-vm-base: cannot open " .. tty .. ": " .. tostring(err) .. "\n")
 	os.exit(1)
 end
 
--- Autoinstall (fetching sets, extracting, installing bootblocks) plus the
--- reboot back to a login prompt is the slow part; give it most of the
--- overall timeout.
+-- The installer powers the VMD guest off when it reboots.  The host starts
+-- a fresh disk-boot VM before the post-install phase, so this first phase
+-- only waits for the installer's final reboot announcement.
+if mode == "installer" then
+	io.stderr:write("build-test-vm-base: waiting for installer reboot\n")
+	local _, rebooted = c:expect("rebooting...", 1500)
+	c:close()
+	if not rebooted then
+		io.stderr:write("build-test-vm-base: installer did not reboot\n")
+		os.exit(1)
+	end
+	os.exit(0)
+end
+
+-- The new disk-boot VM has its own console stream; wait for its installed
+-- system login prompt before driving package provisioning.
 io.stderr:write("build-test-vm-base: waiting for post-install login prompt\n")
 local ok, lerr = c:login("root", password, 1500)
 if not ok then
@@ -192,10 +217,35 @@ end
 io.stderr:write("build-test-vm-base: installing packages\n")
 local status, out = c:exec(
     "PKG_PATH=https://cdn.openbsd.org/pub/OpenBSD/7.9/packages/amd64/ " ..
-    "pkg_add -I lua54 meson ninja", 300)
+    "pkg_add -I 'lua%5.4' meson ninja", 300)
 io.write(out)
 if status ~= 0 then
 	io.stderr:write("build-test-vm-base: pkg_add failed: exit " .. tostring(status) .. "\n")
+	os.exit(1)
+end
+
+-- Verify the site policy was applied to the installed system before
+-- declaring the image ready.  rcctl check is intentionally run for the
+-- disabled services too: it documents their boot-time state in the
+-- transcript, while rcctl get ... status below makes the assertion that
+-- they are disabled.  tty00 is a getty entry in /etc/ttys, not an rc.d
+-- service, so verify that entry directly and check syslogd through rcctl.
+local verify, verify_out = c:exec([[set -e
+awk -F= '$1 == "library_aslr" { print }' /etc/rc.conf /etc/rc.conf.local
+rcctl check cron smtpd sndiod ntpd || true
+rcctl check syslogd
+grep -Eq '^[^#]*tty00[^#]*getty[^#]*on' /etc/ttys
+for service in cron smtpd sndiod ntpd; do
+	if rcctl get "$service" status; then
+		echo "$service unexpectedly enabled" >&2
+		exit 1
+	fi
+done
+rcctl get syslogd status
+]], 30)
+io.write(verify_out or "")
+if verify ~= 0 then
+	io.stderr:write("build-test-vm-base: site policy verification failed: exit " .. tostring(verify) .. "\n")
 	os.exit(1)
 end
 
@@ -213,7 +263,28 @@ c:close()
 os.exit(0)
 LUAEOF
 
-doas env LUA_CPATH="$LUA_CPATH" lua5.4 "$driver" "$root/examples" "$tty" "$root_password"
+doas env LUA_CPATH="$LUA_CPATH" lua5.4 "$driver" "$root/examples" "$tty" "$root_password" "$transcript" installer
+status=$?
+(( status == 0 )) || fail "installer driver failed (exit $status)"
+
+# In VMD, the installed system's reboot request powers down and terminates
+# the VM; it does not reset the same VM through BIOS.  Wait for that instance
+# to disappear, then explicitly boot the installed disk as a new VM.
+deadline=$((SECONDS + timeout))
+while doas vmctl status -r | awk '{print $NF}' | grep -qx "$name"; do
+	(( SECONDS < deadline )) || fail "timed out waiting for installer VM poweroff"
+	sleep 5
+done
+
+doas vmctl start -m 1G -B disk -d "$disk" -L "$name"
+vm_started=true
+sleep 1
+tty=$(doas vmctl status -r | awk -v name="$name" '$NF == name {print $6}')
+[[ -n $tty && -c /dev/$tty ]] || fail "cannot discover serial tty for disk boot of $name"
+tty=/dev/$tty
+
+# This is a new VM instance and therefore a new console connection.
+doas env LUA_CPATH="$LUA_CPATH" lua5.4 "$driver" "$root/examples" "$tty" "$root_password" "$transcript" postinstall
 status=$?
 rm -f "$driver"
 (( status == 0 )) || fail "guest driver failed (exit $status)"

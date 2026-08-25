@@ -27,6 +27,13 @@ assert(t1:test("127.0.0.1") == true)
 t1:clear()
 
 t1:add({"127.0.0.1", "127.0.0.2", "127.0.0.3"})
+t1:delete("127.0.0.2")
+t1:refresh()
+assert(#t1 == 2)
+assert(t1:test("127.0.0.2") == false)
+t1:add("127.0.0.2")
+t1:refresh()
+assert(#t1 == 3)
 
 -- explicit refresh
 t1 = handle:gettable("test1")
@@ -38,6 +45,11 @@ t1:add("127.0.0.4")
 assert(#t1 == 3)
 assert(t1:refresh() == t1)
 assert(#t1 == 4)
+local addresses = t1:addresses()
+assert(type(addresses) == "table" and #addresses == 4)
+for _, address in ipairs(addresses) do
+	assert(type(address) == "string")
+end
 
 assert(t1.counters == false)
 -- a table that is neither persistent nor referenced is dropped when its
@@ -64,6 +76,13 @@ assert(t1:test("127.0.0.10") == true)
 assert(t1:test("127.0.0.1") == false)
 
 assert(type(t1:clearaddrstats()) == "number")
+
+-- IPv6 entries use the same address API.
+t1:add("::1")
+t1:refresh()
+assert(t1:test("::1") == true)
+assert(#t1 == 3)
+t1:clear()
 
 handle:deletetables("test1")
 

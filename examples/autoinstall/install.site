@@ -6,6 +6,11 @@ echo 'https://cdn.openbsd.org/pub/OpenBSD/7.9/amd64' >/etc/installurl
 
 # rc(8) reads this early, before it starts services.
 echo 'library_aslr=NO' >/etc/rc.conf.local
+# This image is driven exclusively over the serial console.  Avoid booting
+# unrelated periodic/network/audio services; retain syslogd for diagnostics.
+for service in cron smtpd sndiod ntpd; do
+	rcctl disable "$service" || true
+done
 
 # Plain getty+login on the serial console (tty00, the line the
 # installer actually enables when com0 is the console -- the "console"

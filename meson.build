@@ -138,6 +138,7 @@ pf_tests = '''
 pf_test_tables.lua
 pf_test_states.lua
 pf_test_rules.lua
+pf_test_queues.lua
 pf_test_system.lua
 '''.split()
 

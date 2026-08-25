@@ -39,19 +39,83 @@ local M = {}
 local Console = {}
 Console.__index = Console
 
+local function escape_transcript(data)
+	return data:gsub("\r", "\\r"):gsub("\t", "\\t")
+end
+
+local function transcript(c, direction, data)
+	if not c.transcript or not data then
+		return
+	end
+	-- Reads are one byte at a time, so buffer each direction and emit one
+	-- record per newline rather than one record per byte.
+	local buffers = c.transcript_buffers
+	local buf = (buffers[direction] or "") .. data
+	while true do
+		local newline = buf:find("\n", 1, true)
+		if not newline then
+			break
+		end
+		c.transcript:write(direction, " ",
+		    escape_transcript(buf:sub(1, newline - 1)), "\n")
+		buf = buf:sub(newline + 1)
+	end
+	buffers[direction] = buf
+	c.transcript:flush()
+end
+
+local function flush_transcript(c)
+	if not c.transcript then
+		return
+	end
+	for _, direction in ipairs({"TX", "RX"}) do
+		local buf = c.transcript_buffers[direction]
+		if buf and #buf > 0 then
+			c.transcript:write(direction, " ", escape_transcript(buf), "\n")
+		end
+	end
+	c.transcript:flush()
+end
+
+local function tx(c, ...)
+	local parts = {...}
+	local data = table.concat(parts)
+	if c.transcript_redact then
+		data = "<redacted>\r\n"
+	end
+	transcript(c, "TX", data)
+	return c.f:write(...)
+end
+
+local function rx(c, data)
+	transcript(c, "RX", data)
+	return data
+end
+
 local function serialutil()
 	return require("serialutil")
 end
 
--- open(port, baud) -> console
-function M.open(port, baud)
+-- open(port, baud, transcript_path) -> console
+-- Password input is recorded as <redacted>.
+function M.open(port, baud, transcript_path)
 	local hu = serialutil()
 	local f, err = hu.serial(port, baud or 115200)
 
 	if not f then
 		return nil, err
 	end
-	return setmetatable({ hu = hu, f = f, fd = hu.fileno(f) }, Console)
+	local transcript_file
+	if transcript_path then
+		transcript_file, err = io.open(transcript_path, "a")
+		if not transcript_file then
+			f:close()
+			return nil, err
+		end
+	end
+	return setmetatable({ hu = hu, f = f, fd = hu.fileno(f),
+	    transcript = transcript_file,
+	    transcript_buffers = { TX = "", RX = "" } }, Console)
 end
 
 local napper = nil
@@ -70,7 +134,7 @@ M.nap = nap
 -- is read/write and C wants the direction change separated by a flush,
 -- else a later read can block forever on a line that went out fine.
 function Console:say(line, settle)
-	self.f:write(line, "\r\n")
+	tx(self, line, "\r\n")
 	self.f:flush()
 	nap(settle or 0.4)
 	return self
@@ -88,7 +152,7 @@ function Console:drain(limit, quiet)
 		if not self.hu.readable(self.fd, quiet or 0.4) then
 			break
 		end
-		if not self.f:read(1) then
+		if not rx(self, self.f:read(1)) then
 			break
 		end
 		n = n + 1
@@ -102,7 +166,7 @@ end
 -- transcript shape to parse against, so gathering until the guest goes
 -- quiet is what actually works, same as hostpanel.lua's ask().
 function Console:ask(line, quiet, max_seconds)
-	self.f:write(line, "\r\n")
+	tx(self, line, "\r\n")
 	self.f:flush()
 
 	local out = {}
@@ -112,7 +176,7 @@ function Console:ask(line, quiet, max_seconds)
 		if not self.hu.readable(self.fd, quiet or 0.6) then
 			break
 		end
-		local c = self.f:read(1)
+		local c = rx(self, self.f:read(1))
 		if not c then
 			break
 		end
@@ -136,7 +200,7 @@ function Console:expect(needle, limit)
 
 	while os.time() <= deadline do
 		if self.hu.readable(self.fd, 0.5) then
-			local c = self.f:read(1)
+			local c = rx(self, self.f:read(1))
 
 			if not c then
 				break
@@ -175,7 +239,9 @@ function Console:login(user, password, timeout)
 		return nil, "timed out waiting for password prompt"
 	end
 
+	self.transcript_redact = true
 	self:say(password, 0.5)
+	self.transcript_redact = false
 	return self
 end
 
@@ -290,7 +356,7 @@ end
 function Console:exec(cmd, timeout)
 	local sentinel = ("LUAPF_DONE_%d"):format(math.random(1, 1e9))
 
-	self.f:write(cmd, "; echo ", sentinel, " $?\r\n")
+	tx(self, cmd, "\necho ", sentinel, " $?\r\n")
 	self.f:flush()
 
 	local out = {}
@@ -300,7 +366,7 @@ function Console:exec(cmd, timeout)
 		if not self.hu.readable(self.fd, 1.0) then
 			goto continue
 		end
-		local c = self.f:read(1)
+		local c = rx(self, self.f:read(1))
 		if not c then
 			return nil, table.concat(out), "console closed"
 		end
@@ -321,7 +387,12 @@ function Console:exec(cmd, timeout)
 end
 
 function Console:close()
+	flush_transcript(self)
 	self.f:close()
+	if self.transcript then
+		self.transcript:close()
+		self.transcript = nil
+	end
 end
 
 return M

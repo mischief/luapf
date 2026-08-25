@@ -3,13 +3,39 @@ local pf = require("pf")
 local h = pf.open()
 assert(h)
 
+local status = h:status()
+assert(type(status) == "table")
+assert(type(status.running) == "boolean")
+assert(type(status.stateid) == "number")
+assert(type(status.since) == "number")
+assert(type(status.states) == "number" and status.states >= 0)
+assert(type(status.states_halfopen) == "number" and status.states_halfopen >= 0)
+assert(type(status.src_nodes) == "number" and status.src_nodes >= 0)
+assert(type(status.hostid) == "number")
+assert(type(status.ifname) == "string")
+assert(type(status.checksum) == "string" and status.checksum:match("^%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x$"))
+for _, group in ipairs({status.counters, status.bcounters.v4, status.bcounters.v6,
+    status.pcounters.v4, status.pcounters.v6}) do
+	assert(type(group) == "table")
+	for _, value in pairs(group) do
+		assert(type(value) == "number" and value >= 0)
+	end
+end
+
 local limits = h:limits()
-assert(type(limits.states) == "number" and limits.states > 0)
-assert(type(limits["table-entries"]) == "number")
+for _, name in ipairs({"states", "src-nodes", "frags", "tables", "table-entries",
+    "pktdelay-pkts", "anchors"}) do
+	assert(type(limits[name]) == "number" and limits[name] >= 0)
+end
 
 local timeouts = h:timeouts()
-assert(timeouts["tcp.established"] > 0)
-assert(type(timeouts["src.track"]) == "number")
+for _, name in ipairs({"tcp.first", "tcp.opening", "tcp.established",
+    "tcp.closing", "tcp.finwait", "tcp.closed", "tcp.tsdiff",
+    "udp.first", "udp.single", "udp.multiple", "icmp.first", "icmp.error",
+    "other.first", "other.single", "other.multiple", "frag", "interval",
+    "adaptive.start", "adaptive.end", "src.track"}) do
+	assert(type(timeouts[name]) == "number" and timeouts[name] >= 0)
+end
 
 local ifs = h:interfaces()
 assert(#ifs > 0)
