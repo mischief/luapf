@@ -169,17 +169,17 @@ pfqueues(lua_State *L)
 		 * A kernel name field can fill its array with no NUL, so
 		 * bound every such read to the size of the array itself.
 		 */
-		lua_pushlstring(L, pqs.queue.qname,
-		                strnlen(pqs.queue.qname,
-		                        sizeof(pqs.queue.qname)));
+		lua_pushlstring(
+		    L, pqs.queue.qname,
+		    strnlen(pqs.queue.qname, sizeof(pqs.queue.qname)));
 		lua_setfield(L, -2, "name");
-		lua_pushlstring(L, pqs.queue.parent,
-		                strnlen(pqs.queue.parent,
-		                        sizeof(pqs.queue.parent)));
+		lua_pushlstring(
+		    L, pqs.queue.parent,
+		    strnlen(pqs.queue.parent, sizeof(pqs.queue.parent)));
 		lua_setfield(L, -2, "parent");
-		lua_pushlstring(L, pqs.queue.ifname,
-		                strnlen(pqs.queue.ifname,
-		                        sizeof(pqs.queue.ifname)));
+		lua_pushlstring(
+		    L, pqs.queue.ifname,
+		    strnlen(pqs.queue.ifname, sizeof(pqs.queue.ifname)));
 		lua_setfield(L, -2, "ifname");
 		lua_pushinteger(L, (lua_Integer)pqs.queue.qid);
 		lua_setfield(L, -2, "qid");

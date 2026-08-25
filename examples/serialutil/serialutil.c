@@ -126,8 +126,8 @@ l_now(lua_State *L)
 	struct timespec ts;
 
 	clock_gettime(CLOCK_MONOTONIC, &ts);
-	lua_pushinteger(L, (lua_Integer)ts.tv_sec * 1000 +
-	    ts.tv_nsec / 1000000);
+	lua_pushinteger(L,
+	                (lua_Integer)ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
 	return 1;
 }
 
@@ -198,17 +198,33 @@ l_serial(lua_State *L)
 	int fd;
 
 	switch (baud) {
-	case 9600: sp = B9600; break;
-	case 19200: sp = B19200; break;
-	case 38400: sp = B38400; break;
-	case 57600: sp = B57600; break;
-	case 115200: sp = B115200; break;
-	case 230400: sp = B230400; break;
+	case 9600:
+		sp = B9600;
+		break;
+	case 19200:
+		sp = B19200;
+		break;
+	case 38400:
+		sp = B38400;
+		break;
+	case 57600:
+		sp = B57600;
+		break;
+	case 115200:
+		sp = B115200;
+		break;
+	case 230400:
+		sp = B230400;
+		break;
 #ifdef B460800
-	case 460800: sp = B460800; break;
+	case 460800:
+		sp = B460800;
+		break;
 #endif
 #ifdef B921600
-	case 921600: sp = B921600; break;
+	case 921600:
+		sp = B921600;
+		break;
 #endif
 	default:
 		return luaL_error(L, "unsupported baud %d", (int)baud);
@@ -274,13 +290,13 @@ l_serial(lua_State *L)
 }
 
 static const luaL_Reg serialutil[] = {
-	{ "serial", l_serial },
-	{ "fileno", l_fileno },
-	{ "readable", l_readable },
-	{ "readsome", l_readsome },
-	{ "now", l_now },
-	{ "sleep", l_sleep },
-	{ NULL, NULL },
+    {"serial",   l_serial  },
+    {"fileno",   l_fileno  },
+    {"readable", l_readable},
+    {"readsome", l_readsome},
+    {"now",      l_now     },
+    {"sleep",    l_sleep   },
+    {NULL,       NULL      },
 };
 
 /* The loader looks this up by name, so it is deliberately not static. */

@@ -292,53 +292,53 @@ struct icmpname {
 
 /* pfctl names ICMP types itself; libc has no lookup for them. */
 static const struct icmpname icmp4names[] = {
-    {0,  "echorep"    },
-    {3,  "unreach"    },
-    {4,  "squench"    },
-    {5,  "redir"      },
-    {6,  "althost"    },
-    {8,  "echoreq"    },
-    {9,  "routeradv"  },
-    {10, "routersol"  },
-    {11, "timex"      },
-    {12, "paramprob"  },
-    {13, "timereq"    },
-    {14, "timerep"    },
-    {15, "inforeq"    },
-    {16, "inforep"    },
-    {17, "maskreq"    },
-    {18, "maskrep"    },
-    {30, "trace"      },
-    {31, "dataconv"   },
-    {32, "mobredir"   },
-    {33, "ipv6-where" },
-    {34, "ipv6-here"  },
-    {35, "mobregreq"  },
-    {36, "mobregrep"  },
-    {39, "skip"       },
-    {40, "photuris"   },
+    {0,  "echorep"   },
+    {3,  "unreach"   },
+    {4,  "squench"   },
+    {5,  "redir"     },
+    {6,  "althost"   },
+    {8,  "echoreq"   },
+    {9,  "routeradv" },
+    {10, "routersol" },
+    {11, "timex"     },
+    {12, "paramprob" },
+    {13, "timereq"   },
+    {14, "timerep"   },
+    {15, "inforeq"   },
+    {16, "inforep"   },
+    {17, "maskreq"   },
+    {18, "maskrep"   },
+    {30, "trace"     },
+    {31, "dataconv"  },
+    {32, "mobredir"  },
+    {33, "ipv6-where"},
+    {34, "ipv6-here" },
+    {35, "mobregreq" },
+    {36, "mobregrep" },
+    {39, "skip"      },
+    {40, "photuris"  },
 };
 
 static const struct icmpname icmp6names[] = {
-    {1,   "unreach"    },
-    {2,   "toobig"     },
-    {3,   "timex"      },
-    {4,   "paramprob"  },
-    {128, "echoreq"    },
-    {129, "echorep"    },
-    {130, "groupqry"   },
-    {131, "grouprep"   },
-    {132, "groupterm"  },
-    {133, "routersol"  },
-    {134, "routeradv"  },
-    {135, "neighbrsol" },
-    {136, "neighbradv" },
-    {137, "redir"      },
-    {138, "routrrenum" },
-    {139, "fqdnreq"    },
-    {140, "fqdnrep"    },
-    {200, "wrureq"     },
-    {201, "wrurep"     },
+    {1,   "unreach"   },
+    {2,   "toobig"    },
+    {3,   "timex"     },
+    {4,   "paramprob" },
+    {128, "echoreq"   },
+    {129, "echorep"   },
+    {130, "groupqry"  },
+    {131, "grouprep"  },
+    {132, "groupterm" },
+    {133, "routersol" },
+    {134, "routeradv" },
+    {135, "neighbrsol"},
+    {136, "neighbradv"},
+    {137, "redir"     },
+    {138, "routrrenum"},
+    {139, "fqdnreq"   },
+    {140, "fqdnrep"   },
+    {200, "wrureq"    },
+    {201, "wrurep"    },
 };
 
 static const char *
@@ -431,8 +431,8 @@ addicmp(luaL_Buffer *b, const struct pf_rule *rule)
 	if (rule->type == 0)
 		return;
 
-	luaL_addstring(b, rule->af == AF_INET6 ? " icmp6-type " :
-	                                         " icmp-type ");
+	luaL_addstring(b,
+	               rule->af == AF_INET6 ? " icmp6-type " : " icmp-type ");
 
 	name = icmpname((uint8_t)(rule->type - 1), rule->af);
 	if (name != NULL)
@@ -445,7 +445,7 @@ addicmp(luaL_Buffer *b, const struct pf_rule *rule)
 	if (rule->code != 0) {
 		luaL_addstring(b, " code ");
 		name = icmpcodename((uint8_t)(rule->type - 1),
-		    (uint8_t)(rule->code - 1), rule->af);
+		                    (uint8_t)(rule->code - 1), rule->af);
 		if (name != NULL)
 			luaL_addstring(b, name);
 		else {
@@ -462,8 +462,8 @@ addicmp(luaL_Buffer *b, const struct pf_rule *rule)
 static void
 addreturnicmp(luaL_Buffer *b, uint16_t v, sa_family_t af)
 {
-	const char *name = icmpcodename((uint8_t)(v >> 8), (uint8_t)(v & 255),
-	    af);
+	const char *name =
+	    icmpcodename((uint8_t)(v >> 8), (uint8_t)(v & 255), af);
 	char num[16];
 
 	if (name != NULL) {
@@ -490,7 +490,7 @@ addreturn(luaL_Buffer *b, const struct pf_rule *rule)
 			luaL_addstring(b, " return-rst");
 		else {
 			snprintf(num, sizeof(num), " return-rst(ttl %u)",
-			    rule->return_ttl);
+			         rule->return_ttl);
 			luaL_addstring(b, num);
 		}
 		return;
@@ -536,11 +536,13 @@ addcomma(luaL_Buffer *b, bool *first)
 /* pf_rule.timeout[] is indexed by PFTM_*, so these names are in that order
  * and stop at PFTM_MAX, where the special cases begin. */
 static const char *const timeoutnames[PFTM_MAX] = {
-    "tcp.first", "tcp.opening", "tcp.established", "tcp.closing",
-    "tcp.finwait", "tcp.closed", "udp.first", "udp.single", "udp.multiple",
-    "icmp.first", "icmp.error", "other.first", "other.single",
-    "other.multiple", "frag", "interval", "adaptive.start", "adaptive.end",
-    "src.track", "ts.diff",
+    "tcp.first",    "tcp.opening",    "tcp.established",
+    "tcp.closing",  "tcp.finwait",    "tcp.closed",
+    "udp.first",    "udp.single",     "udp.multiple",
+    "icmp.first",   "icmp.error",     "other.first",
+    "other.single", "other.multiple", "frag",
+    "interval",     "adaptive.start", "adaptive.end",
+    "src.track",    "ts.diff",
 };
 
 static bool
@@ -558,7 +560,8 @@ static bool
 hasstateopts(const struct pf_rule *rule)
 {
 	static const uint32_t flags = PFRULE_NOSYNC | PFRULE_SRCTRACK |
-	    PFRULE_IFBOUND | PFRULE_STATESLOPPY | PFRULE_PFLOW;
+	                              PFRULE_IFBOUND | PFRULE_STATESLOPPY |
+	                              PFRULE_PFLOW;
 
 	return rule->max_states != 0 || rule->max_src_nodes != 0 ||
 	       rule->max_src_states != 0 || rule->max_src_conn != 0 ||
@@ -589,37 +592,37 @@ addstateopts(luaL_Buffer *b, const struct pf_rule *rule)
 	if (rule->rule_flag & PFRULE_SRCTRACK) {
 		addcomma(b, &first);
 		luaL_addstring(b, "source-track");
-		luaL_addstring(b, (rule->rule_flag & PFRULE_RULESRCTRACK) ?
-		        " rule" :
-		        " global");
+		luaL_addstring(b, (rule->rule_flag & PFRULE_RULESRCTRACK)
+		                      ? " rule"
+		                      : " global");
 	}
 
 	if (rule->max_src_states != 0) {
 		addcomma(b, &first);
 		snprintf(num, sizeof(num), "max-src-states %u",
-		    rule->max_src_states);
+		         rule->max_src_states);
 		luaL_addstring(b, num);
 	}
 
 	if (rule->max_src_conn != 0) {
 		addcomma(b, &first);
 		snprintf(num, sizeof(num), "max-src-conn %u",
-		    rule->max_src_conn);
+		         rule->max_src_conn);
 		luaL_addstring(b, num);
 	}
 
 	if (rule->max_src_conn_rate.limit != 0) {
 		addcomma(b, &first);
 		snprintf(num, sizeof(num), "max-src-conn-rate %u/%u",
-		    rule->max_src_conn_rate.limit,
-		    rule->max_src_conn_rate.seconds);
+		         rule->max_src_conn_rate.limit,
+		         rule->max_src_conn_rate.seconds);
 		luaL_addstring(b, num);
 	}
 
 	if (rule->max_src_nodes != 0) {
 		addcomma(b, &first);
 		snprintf(num, sizeof(num), "max-src-nodes %u",
-		    rule->max_src_nodes);
+		         rule->max_src_nodes);
 		luaL_addstring(b, num);
 	}
 
@@ -627,7 +630,7 @@ addstateopts(luaL_Buffer *b, const struct pf_rule *rule)
 		addcomma(b, &first);
 		luaL_addstring(b, "overload <");
 		addbounded(b, rule->overload_tblname,
-		    sizeof(rule->overload_tblname));
+		           sizeof(rule->overload_tblname));
 		luaL_addchar(b, '>');
 		if (rule->flush)
 			luaL_addstring(b, " flush");
@@ -655,7 +658,7 @@ addstateopts(luaL_Buffer *b, const struct pf_rule *rule)
 			continue;
 		addcomma(b, &first);
 		snprintf(num, sizeof(num), "%s %u", timeoutnames[i],
-		    rule->timeout[i]);
+		         rule->timeout[i]);
 		luaL_addstring(b, num);
 	}
 
@@ -694,7 +697,7 @@ addprob(luaL_Buffer *b, const struct pf_rule *rule)
 		return;
 
 	snprintf(num, sizeof(num), "%f",
-	    (double)rule->prob * 100.0 / ((double)UINT_MAX + 1.0));
+	         (double)rule->prob * 100.0 / ((double)UINT_MAX + 1.0));
 
 	for (int i = (int)strlen(num) - 1; i > 0; i--) {
 		if (num[i] == '0')
@@ -738,7 +741,7 @@ addscrubopts(luaL_Buffer *b, const struct pf_rule *rule)
 
 	if (rule->min_ttl != 0) {
 		snprintf(num, sizeof(num), "%smin-ttl %u", first ? "" : " ",
-		    rule->min_ttl);
+		         rule->min_ttl);
 		first = false;
 		luaL_addstring(b, num);
 	}
@@ -751,7 +754,7 @@ addscrubopts(luaL_Buffer *b, const struct pf_rule *rule)
 
 	if (rule->max_mss != 0) {
 		snprintf(num, sizeof(num), "%smax-mss %u", first ? "" : " ",
-		    rule->max_mss);
+		         rule->max_mss);
 		luaL_addstring(b, num);
 	}
 
@@ -792,7 +795,7 @@ adddivert(lua_State *L, luaL_Buffer *b, const struct pf_rule *rule)
 
 	if (rule->divert.type != PF_DIVERT_REPLY) {
 		snprintf(num, sizeof(num), " port %u",
-		    ntohs(rule->divert.port));
+		         ntohs(rule->divert.port));
 		luaL_addstring(b, num);
 	}
 }
@@ -821,10 +824,10 @@ addsetopts(luaL_Buffer *b, const struct pf_rule *rule)
 		addcomma(b, &first);
 		if (rule->set_prio[0] == rule->set_prio[1])
 			snprintf(num, sizeof(num), "prio %u",
-			    rule->set_prio[0]);
+			         rule->set_prio[0]);
 		else
 			snprintf(num, sizeof(num), "prio(%u, %u)",
-			    rule->set_prio[0], rule->set_prio[1]);
+			         rule->set_prio[0], rule->set_prio[1]);
 		luaL_addstring(b, num);
 	}
 
@@ -910,7 +913,7 @@ pushruleaddr(lua_State *L, const struct pf_rule_addr *ra, sa_family_t af)
  * pfctl leaves a nat pool's port silent when it spans the default proxy
  * range, because that range is what "nat-to" means with no port given.
  */
-#define NAT_PROXY_PORT_LOW  50001
+#define NAT_PROXY_PORT_LOW 50001
 #define NAT_PROXY_PORT_HIGH 65535
 
 /* Which of a rule's three pools is in hand, since each prints its port
@@ -1024,7 +1027,7 @@ poolhasport(const struct pf_pool *p, enum poolkind kind)
 	switch (kind) {
 	case POOL_NAT:
 		return (p->proxy_port[0] != NAT_PROXY_PORT_LOW ||
-		           p->proxy_port[1] != NAT_PROXY_PORT_HIGH) &&
+		        p->proxy_port[1] != NAT_PROXY_PORT_HIGH) &&
 		       (p->proxy_port[0] != 0 || p->proxy_port[1] != 0);
 	case POOL_RDR:
 		return p->proxy_port[0] != 0;
@@ -1077,8 +1080,8 @@ static void
 addtranslation(lua_State *L, luaL_Buffer *b, const struct pf_rule *rule)
 {
 	if (poolisset(&rule->nat)) {
-		luaL_addstring(b,
-		    (rule->rule_flag & PFRULE_AFTO) ? " af-to " : " nat-to ");
+		luaL_addstring(b, (rule->rule_flag & PFRULE_AFTO) ? " af-to "
+		                                                  : " nat-to ");
 		addpool(L, b, &rule->nat, POOL_NAT, poolaf(rule, POOL_NAT));
 	}
 
@@ -1142,7 +1145,7 @@ pushpoolport(lua_State *L, int idx, int which)
 	if (p == NULL || !poolhasport(p, kind))
 		lua_pushnil(L);
 	else if (which == 1 && (p->proxy_port[1] == 0 ||
-	                           p->proxy_port[1] == p->proxy_port[0]))
+	                        p->proxy_port[1] == p->proxy_port[0]))
 		/* A single translated port has no upper bound to report,
 		 * the same reason pfctl leaves one off the line. */
 		lua_pushnil(L);
@@ -1230,7 +1233,7 @@ rule_user(lua_State *L, int idx)
 	struct luapfrule *r = luaL_checkudata(L, idx, PFRULE_MT);
 
 	return pushugid(L, r->rule.uid.op, r->rule.uid.uid[0],
-	    r->rule.uid.uid[1]);
+	                r->rule.uid.uid[1]);
 }
 
 static int
@@ -1239,7 +1242,7 @@ rule_group(lua_State *L, int idx)
 	struct luapfrule *r = luaL_checkudata(L, idx, PFRULE_MT);
 
 	return pushugid(L, r->rule.gid.op, r->rule.gid.gid[0],
-	    r->rule.gid.gid[1]);
+	                r->rule.gid.gid[1]);
 }
 
 static int
@@ -1486,9 +1489,9 @@ rule_source_track(lua_State *L, int idx)
 	if ((r->rule.rule_flag & PFRULE_SRCTRACK) == 0)
 		lua_pushnil(L);
 	else
-		lua_pushstring(L,
-		    (r->rule.rule_flag & PFRULE_RULESRCTRACK) ? "rule" :
-		                                                "global");
+		lua_pushstring(L, (r->rule.rule_flag & PFRULE_RULESRCTRACK)
+		                      ? "rule"
+		                      : "global");
 
 	return 1;
 }
@@ -1548,8 +1551,8 @@ pushreturnicmp(lua_State *L, int idx, sa_family_t af)
 	}
 
 	luaL_buffinit(L, &b);
-	addreturnicmp(&b, af == AF_INET6 ? r->rule.return_icmp6 :
-	                                   r->rule.return_icmp,
+	addreturnicmp(
+	    &b, af == AF_INET6 ? r->rule.return_icmp6 : r->rule.return_icmp,
 	    af);
 	luaL_pushresult(&b);
 
@@ -1602,8 +1605,8 @@ rule_probability(lua_State *L, int idx)
 	if (r->rule.prob == 0)
 		lua_pushnil(L);
 	else
-		lua_pushnumber(L,
-		    (lua_Number)r->rule.prob * 100.0 / ((double)UINT_MAX + 1.0));
+		lua_pushnumber(L, (lua_Number)r->rule.prob * 100.0 /
+		                      ((double)UINT_MAX + 1.0));
 
 	return 1;
 }
@@ -2026,83 +2029,83 @@ rule_states_total(lua_State *L, int idx)
 }
 
 static const struct ro_property rule_properties[] = {
-    {"nr",           rule_nr          },
-    {"action",       rule_action      },
-    {"direction",    rule_direction   },
-    {"af",           rule_af          },
-    {"proto",        rule_proto       },
-    {"quick",        rule_quick       },
-    {"log",          rule_log         },
-    {"keep_state",   rule_keep_state  },
-    {"interface",    rule_interface   },
-    {"label",        rule_label       },
-    {"tag",          rule_tag         },
-    {"anchor",       rule_anchor      },
-    {"anchor_call",  rule_anchor_call },
-    {"source",       rule_src         },
-    {"destination",  rule_dst         },
-    {"interface_not", rule_interface_not},
-    {"evaluations",  rule_evaluations },
-    {"packets_in",   rule_packets_in  },
-    {"packets_out",  rule_packets_out },
-    {"bytes_in",     rule_bytes_in    },
-    {"bytes_out",    rule_bytes_out   },
-    {"states_cur",   rule_states_cur  },
-    {"states_total", rule_states_total},
-    {"user",         rule_user        },
-    {"group",        rule_group       },
-    {"flags",        rule_flags       },
-    {"redirect",     rule_redirect    },
-    {"redirect_address", rule_redirect_address},
-    {"redirect_port", rule_redirect_port},
-    {"redirect_port_end", rule_redirect_port_end},
-    {"pool_type",    rule_pool_type   },
-    {"sticky_address", rule_sticky_address},
-    {"static_port",  rule_static_port },
-    {"rdomain",      rule_rdomain     },
-    {"rtable",       rule_rtable      },
-    {"return_policy", rule_return_policy},
-    {"return_ttl",   rule_return_ttl  },
-    {"return_icmp",  rule_return_icmp },
-    {"return_icmp6", rule_return_icmp6},
-    {"fragment",     rule_fragment    },
-    {"no_sync",      rule_no_sync     },
-    {"source_track", rule_source_track},
-    {"if_bound",     rule_if_bound    },
-    {"sloppy",       rule_sloppy      },
-    {"pflow",        rule_pflow       },
-    {"once",         rule_once        },
-    {"expired",      rule_expired     },
-    {"af_to",        rule_af_to       },
-    {"delay",        rule_delay       },
-    {"probability",  rule_probability },
-    {"allow_opts",   rule_allow_opts  },
-    {"min_ttl",      rule_min_ttl     },
-    {"max_mss",      rule_max_mss     },
-    {"tos",          rule_tos         },
-    {"set_tos",      rule_set_tos     },
-    {"no_df",        rule_no_df       },
-    {"random_id",    rule_random_id   },
-    {"reassemble_tcp", rule_reassemble_tcp},
-    {"match_tag",    rule_match_tag   },
-    {"match_tag_not", rule_match_tag_not},
-    {"os_fingerprint", rule_os_fingerprint},
-    {"anchor_relative", rule_anchor_relative},
-    {"anchor_wildcard", rule_anchor_wildcard},
-    {"divert",       rule_divert      },
-    {"divert_address", rule_divert_address},
-    {"divert_port",  rule_divert_port },
-    {"source_addresses", rule_source_addresses},
+    {"nr",                    rule_nr                   },
+    {"action",                rule_action               },
+    {"direction",             rule_direction            },
+    {"af",                    rule_af                   },
+    {"proto",                 rule_proto                },
+    {"quick",                 rule_quick                },
+    {"log",                   rule_log                  },
+    {"keep_state",            rule_keep_state           },
+    {"interface",             rule_interface            },
+    {"label",                 rule_label                },
+    {"tag",                   rule_tag                  },
+    {"anchor",                rule_anchor               },
+    {"anchor_call",           rule_anchor_call          },
+    {"source",                rule_src                  },
+    {"destination",           rule_dst                  },
+    {"interface_not",         rule_interface_not        },
+    {"evaluations",           rule_evaluations          },
+    {"packets_in",            rule_packets_in           },
+    {"packets_out",           rule_packets_out          },
+    {"bytes_in",              rule_bytes_in             },
+    {"bytes_out",             rule_bytes_out            },
+    {"states_cur",            rule_states_cur           },
+    {"states_total",          rule_states_total         },
+    {"user",                  rule_user                 },
+    {"group",                 rule_group                },
+    {"flags",                 rule_flags                },
+    {"redirect",              rule_redirect             },
+    {"redirect_address",      rule_redirect_address     },
+    {"redirect_port",         rule_redirect_port        },
+    {"redirect_port_end",     rule_redirect_port_end    },
+    {"pool_type",             rule_pool_type            },
+    {"sticky_address",        rule_sticky_address       },
+    {"static_port",           rule_static_port          },
+    {"rdomain",               rule_rdomain              },
+    {"rtable",                rule_rtable               },
+    {"return_policy",         rule_return_policy        },
+    {"return_ttl",            rule_return_ttl           },
+    {"return_icmp",           rule_return_icmp          },
+    {"return_icmp6",          rule_return_icmp6         },
+    {"fragment",              rule_fragment             },
+    {"no_sync",               rule_no_sync              },
+    {"source_track",          rule_source_track         },
+    {"if_bound",              rule_if_bound             },
+    {"sloppy",                rule_sloppy               },
+    {"pflow",                 rule_pflow                },
+    {"once",                  rule_once                 },
+    {"expired",               rule_expired              },
+    {"af_to",                 rule_af_to                },
+    {"delay",                 rule_delay                },
+    {"probability",           rule_probability          },
+    {"allow_opts",            rule_allow_opts           },
+    {"min_ttl",               rule_min_ttl              },
+    {"max_mss",               rule_max_mss              },
+    {"tos",                   rule_tos                  },
+    {"set_tos",               rule_set_tos              },
+    {"no_df",                 rule_no_df                },
+    {"random_id",             rule_random_id            },
+    {"reassemble_tcp",        rule_reassemble_tcp       },
+    {"match_tag",             rule_match_tag            },
+    {"match_tag_not",         rule_match_tag_not        },
+    {"os_fingerprint",        rule_os_fingerprint       },
+    {"anchor_relative",       rule_anchor_relative      },
+    {"anchor_wildcard",       rule_anchor_wildcard      },
+    {"divert",                rule_divert               },
+    {"divert_address",        rule_divert_address       },
+    {"divert_port",           rule_divert_port          },
+    {"source_addresses",      rule_source_addresses     },
     {"destination_addresses", rule_destination_addresses},
-    {"src_nodes",    rule_src_nodes   },
-    {"max_pkt_rate", rule_max_pkt_rate},
-    {"max_pkt_rate_seconds", rule_max_pkt_rate_seconds},
-    {"pkt_rate_count", rule_pkt_rate_count},
-    {"pkt_rate_last", rule_pkt_rate_last},
-    {"created_uid",  rule_created_uid },
-    {"created_pid",  rule_created_pid },
-    {"expires",      rule_expires     },
-    {NULL,           NULL             },
+    {"src_nodes",             rule_src_nodes            },
+    {"max_pkt_rate",          rule_max_pkt_rate         },
+    {"max_pkt_rate_seconds",  rule_max_pkt_rate_seconds },
+    {"pkt_rate_count",        rule_pkt_rate_count       },
+    {"pkt_rate_last",         rule_pkt_rate_last        },
+    {"created_uid",           rule_created_uid          },
+    {"created_pid",           rule_created_pid          },
+    {"expires",               rule_expires              },
+    {NULL,                    NULL                      },
 };
 
 static int
@@ -2187,7 +2190,7 @@ pfruletostring(lua_State *L)
 		char num[32];
 
 		snprintf(num, sizeof(num), " on %srdomain %d",
-		    r->rule.ifnot ? "! " : "", r->rule.onrdomain);
+		         r->rule.ifnot ? "! " : "", r->rule.onrdomain);
 		luaL_addstring(&b, num);
 	}
 
@@ -2221,8 +2224,7 @@ pfruletostring(lua_State *L)
 		luaL_addstring(&b, " received-on ");
 		if (r->rule.rcvifnot)
 			luaL_addstring(&b, "! ");
-		addbounded(&b, r->rule.rcv_ifname,
-		    sizeof(r->rule.rcv_ifname));
+		addbounded(&b, r->rule.rcv_ifname, sizeof(r->rule.rcv_ifname));
 	}
 
 	addicmp(&b, &r->rule);
@@ -2230,13 +2232,13 @@ pfruletostring(lua_State *L)
 	if (opname(r->rule.uid.op) != NULL) {
 		luaL_addstring(&b, " user ");
 		addoperands(&b, r->rule.uid.op, r->rule.uid.uid[0],
-		    r->rule.uid.uid[1]);
+		            r->rule.uid.uid[1]);
 	}
 
 	if (opname(r->rule.gid.op) != NULL) {
 		luaL_addstring(&b, " group ");
 		addoperands(&b, r->rule.gid.op, r->rule.gid.gid[0],
-		    r->rule.gid.gid[1]);
+		            r->rule.gid.gid[1]);
 	}
 
 	if (r->rule.flags != 0 || r->rule.flagset != 0) {
@@ -2255,7 +2257,7 @@ pfruletostring(lua_State *L)
 		char num[32];
 
 		snprintf(num, sizeof(num), " max-pkt-rate %u/%u",
-		    r->rule.pktrate.limit, r->rule.pktrate.seconds);
+		         r->rule.pktrate.limit, r->rule.pktrate.seconds);
 		luaL_addstring(&b, num);
 	}
 
@@ -2289,10 +2291,10 @@ pfruletostring(lua_State *L)
 	}
 
 	if (r->rule.match_tagname[0] != '\0') {
-		luaL_addstring(&b, r->rule.match_tag_not ? " ! tagged " :
-		                                           " tagged ");
+		luaL_addstring(&b, r->rule.match_tag_not ? " ! tagged "
+		                                         : " tagged ");
 		addbounded(&b, r->rule.match_tagname,
-		    sizeof(r->rule.match_tagname));
+		           sizeof(r->rule.match_tagname));
 	}
 
 	if (r->rule.rtableid >= 0) {

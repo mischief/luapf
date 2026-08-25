@@ -335,8 +335,8 @@ state_gateway(lua_State *L, int idx)
 	struct pfsync_state *s = luaL_checkudata(L, idx, PFSTATE_MT);
 	const struct pfsync_state_key *other = directionkey(s, 1);
 
-	return pushhostport(
-	    L, other->af, &other->addr[1], be16toh(other->port[1]));
+	return pushhostport(L, other->af, &other->addr[1],
+	                    be16toh(other->port[1]));
 }
 
 /*
@@ -493,9 +493,9 @@ state_connection_state(lua_State *L, int idx)
 	struct pfsync_state *s = luaL_checkudata(L, idx, PFSTATE_MT);
 	char src[maxlevelname], dst[maxlevelname];
 
-	lua_pushfstring(L, "%s:%s",
-	                peerstatename(s->proto, s->src.state, src, sizeof(src)),
-	                peerstatename(s->proto, s->dst.state, dst, sizeof(dst)));
+	lua_pushfstring(
+	    L, "%s:%s", peerstatename(s->proto, s->src.state, src, sizeof(src)),
+	    peerstatename(s->proto, s->dst.state, dst, sizeof(dst)));
 
 	return 1;
 }
@@ -504,18 +504,18 @@ static const struct {
 	uint16_t bit;
 	const char *name;
 } stateflagnames[] = {
-    {PFSTATE_ALLOWOPTS,     "allowopts"   },
-    {PFSTATE_SLOPPY,        "sloppy"      },
-    {PFSTATE_PFLOW,         "pflow"       },
-    {PFSTATE_NOSYNC,        "nosync"      },
-    {PFSTATE_ACK,           "ack"         },
-    {PFSTATE_NODF,          "nodf"        },
-    {PFSTATE_SETTOS,        "settos"      },
-    {PFSTATE_RANDOMID,      "randomid"    },
-    {PFSTATE_SCRUB_TCP,     "scrub-tcp"   },
-    {PFSTATE_SETPRIO,       "setprio"     },
-    {PFSTATE_INP_UNLINKED,  "inp-unlinked"},
-    {0,                     NULL          },
+    {PFSTATE_ALLOWOPTS,    "allowopts"   },
+    {PFSTATE_SLOPPY,       "sloppy"      },
+    {PFSTATE_PFLOW,        "pflow"       },
+    {PFSTATE_NOSYNC,       "nosync"      },
+    {PFSTATE_ACK,          "ack"         },
+    {PFSTATE_NODF,         "nodf"        },
+    {PFSTATE_SETTOS,       "settos"      },
+    {PFSTATE_RANDOMID,     "randomid"    },
+    {PFSTATE_SCRUB_TCP,    "scrub-tcp"   },
+    {PFSTATE_SETPRIO,      "setprio"     },
+    {PFSTATE_INP_UNLINKED, "inp-unlinked"},
+    {0,                    NULL          },
 };
 
 static int
@@ -775,50 +775,50 @@ state_dst_wscale(lua_State *L, int idx)
 }
 
 static const struct ro_property state_properties[] = {
-    {"id",                state_id               },
-    {"creatorid",         state_creatorid        },
-    {"ifname",            state_ifname           },
-    {"proto",             state_proto            },
-    {"direction",         state_direction        },
-    {"rule",              state_rule             },
-    {"anchor",            state_anchor           },
-    {"creation",          state_creation         },
-    {"expire",            state_expire           },
-    {"timeout",           state_timeout          },
-    {"timeout_name",      state_timeout_name     },
-    {"source",            state_source           },
-    {"destination",       state_destination      },
-    {"gateway",           state_gateway          },
-    {"near_wire",         state_near_wire        },
-    {"far_wire",          state_far_wire         },
-    {"near_stack",        state_near_stack       },
-    {"far_stack",         state_far_stack        },
-    {"rdomain",           state_rdomain          },
-    {"gateway_rdomain",   state_gateway_rdomain  },
-    {"route",             state_route            },
-    {"route_addr",        state_route_addr       },
-    {"src_state",         state_src_state        },
-    {"dst_state",         state_dst_state        },
-    {"connection_state",  state_connection_state },
-    {"state_flags",       state_state_flags      },
-    {"state_flag_names",  state_state_flag_names },
-    {"packets_in",        state_packets_in       },
-    {"packets_out",       state_packets_out      },
-    {"bytes_in",          state_bytes_in         },
-    {"bytes_out",         state_bytes_out        },
-    {"src_seqlo",         state_src_seqlo        },
-    {"src_seqhi",         state_src_seqhi        },
-    {"src_seqdiff",       state_src_seqdiff      },
-    {"src_max_win",       state_src_max_win      },
-    {"src_mss",           state_src_mss          },
-    {"src_wscale",        state_src_wscale       },
-    {"dst_seqlo",         state_dst_seqlo        },
-    {"dst_seqhi",         state_dst_seqhi        },
-    {"dst_seqdiff",       state_dst_seqdiff      },
-    {"dst_max_win",       state_dst_max_win      },
-    {"dst_mss",           state_dst_mss          },
-    {"dst_wscale",        state_dst_wscale       },
-    {NULL,                NULL                   },
+    {"id",               state_id              },
+    {"creatorid",        state_creatorid       },
+    {"ifname",           state_ifname          },
+    {"proto",            state_proto           },
+    {"direction",        state_direction       },
+    {"rule",             state_rule            },
+    {"anchor",           state_anchor          },
+    {"creation",         state_creation        },
+    {"expire",           state_expire          },
+    {"timeout",          state_timeout         },
+    {"timeout_name",     state_timeout_name    },
+    {"source",           state_source          },
+    {"destination",      state_destination     },
+    {"gateway",          state_gateway         },
+    {"near_wire",        state_near_wire       },
+    {"far_wire",         state_far_wire        },
+    {"near_stack",       state_near_stack      },
+    {"far_stack",        state_far_stack       },
+    {"rdomain",          state_rdomain         },
+    {"gateway_rdomain",  state_gateway_rdomain },
+    {"route",            state_route           },
+    {"route_addr",       state_route_addr      },
+    {"src_state",        state_src_state       },
+    {"dst_state",        state_dst_state       },
+    {"connection_state", state_connection_state},
+    {"state_flags",      state_state_flags     },
+    {"state_flag_names", state_state_flag_names},
+    {"packets_in",       state_packets_in      },
+    {"packets_out",      state_packets_out     },
+    {"bytes_in",         state_bytes_in        },
+    {"bytes_out",        state_bytes_out       },
+    {"src_seqlo",        state_src_seqlo       },
+    {"src_seqhi",        state_src_seqhi       },
+    {"src_seqdiff",      state_src_seqdiff     },
+    {"src_max_win",      state_src_max_win     },
+    {"src_mss",          state_src_mss         },
+    {"src_wscale",       state_src_wscale      },
+    {"dst_seqlo",        state_dst_seqlo       },
+    {"dst_seqhi",        state_dst_seqhi       },
+    {"dst_seqdiff",      state_dst_seqdiff     },
+    {"dst_max_win",      state_dst_max_win     },
+    {"dst_mss",          state_dst_mss         },
+    {"dst_wscale",       state_dst_wscale      },
+    {NULL,               NULL                  },
 };
 
 static int
