@@ -61,6 +61,35 @@ actionname(uint8_t action)
 	return actionnames[action];
 }
 
+/*
+ * The kernel fills fixed-size character arrays that it need not NUL
+ * terminate, so every read of one is bounded by the size of the array. Pass
+ * that size explicitly: sizeof on a parameter would measure the pointer.
+ */
+static void
+pushbounded(lua_State *L, const char *s, size_t size)
+{
+	lua_pushlstring(L, s, strnlen(s, size));
+}
+
+static void
+addbounded(luaL_Buffer *b, const char *s, size_t size)
+{
+	luaL_addlstring(b, s, strnlen(s, size));
+}
+
+static void
+copybounded(char *dst, size_t dstsize, const char *src, size_t srcsize)
+{
+	size_t n = strnlen(src, srcsize);
+
+	if (n >= dstsize)
+		n = dstsize - 1;
+
+	memcpy(dst, src, n);
+	dst[n] = '\0';
+}
+
 static int
 maskbits(const struct pf_addr *m)
 {
@@ -110,12 +139,12 @@ addaddrwrap(lua_State *L, luaL_Buffer *b, const struct pf_addr_wrap *aw,
 	switch (aw->type) {
 	case PF_ADDR_DYNIFTL:
 		luaL_addchar(b, '(');
-		luaL_addstring(b, aw->v.ifname);
+		addbounded(b, aw->v.ifname, sizeof(aw->v.ifname));
 		luaL_addchar(b, ')');
 		return;
 	case PF_ADDR_TABLE:
 		luaL_addchar(b, '<');
-		luaL_addstring(b, aw->v.tblname);
+		addbounded(b, aw->v.tblname, sizeof(aw->v.tblname));
 		luaL_addchar(b, '>');
 		return;
 	case PF_ADDR_NOROUTE:
@@ -126,7 +155,7 @@ addaddrwrap(lua_State *L, luaL_Buffer *b, const struct pf_addr_wrap *aw,
 		return;
 	case PF_ADDR_RTLABEL:
 		luaL_addstring(b, "route \"");
-		luaL_addstring(b, aw->v.rtlabelname);
+		addbounded(b, aw->v.rtlabelname, sizeof(aw->v.rtlabelname));
 		luaL_addchar(b, '"');
 		return;
 	case PF_ADDR_RANGE:
@@ -371,7 +400,7 @@ rule_interface(lua_State *L, int idx)
 {
 	struct luapfrule *r = luaL_checkudata(L, idx, PFRULE_MT);
 
-	lua_pushstring(L, r->rule.ifname);
+	pushbounded(L, r->rule.ifname, sizeof(r->rule.ifname));
 
 	return 1;
 }
@@ -381,7 +410,7 @@ rule_label(lua_State *L, int idx)
 {
 	struct luapfrule *r = luaL_checkudata(L, idx, PFRULE_MT);
 
-	lua_pushstring(L, r->rule.label);
+	pushbounded(L, r->rule.label, sizeof(r->rule.label));
 
 	return 1;
 }
@@ -391,7 +420,7 @@ rule_tag(lua_State *L, int idx)
 {
 	struct luapfrule *r = luaL_checkudata(L, idx, PFRULE_MT);
 
-	lua_pushstring(L, r->rule.tagname);
+	pushbounded(L, r->rule.tagname, sizeof(r->rule.tagname));
 
 	return 1;
 }
@@ -401,7 +430,7 @@ rule_anchor(lua_State *L, int idx)
 {
 	struct luapfrule *r = luaL_checkudata(L, idx, PFRULE_MT);
 
-	lua_pushstring(L, r->anchor);
+	pushbounded(L, r->anchor, sizeof(r->anchor));
 
 	return 1;
 }
@@ -411,7 +440,7 @@ rule_anchor_call(lua_State *L, int idx)
 {
 	struct luapfrule *r = luaL_checkudata(L, idx, PFRULE_MT);
 
-	lua_pushstring(L, r->anchor_call);
+	pushbounded(L, r->anchor_call, sizeof(r->anchor_call));
 
 	return 1;
 }
@@ -560,7 +589,7 @@ pfruletostring(lua_State *L)
 	if (r->anchor_call[0] != '\0') {
 		luaL_addstring(&b, anchorname(r->rule.action));
 		luaL_addstring(&b, " \"");
-		luaL_addstring(&b, r->anchor_call);
+		addbounded(&b, r->anchor_call, sizeof(r->anchor_call));
 		luaL_addchar(&b, '"');
 	} else {
 		luaL_addstring(&b, actionname(r->rule.action));
@@ -590,7 +619,7 @@ pfruletostring(lua_State *L)
 
 	if (r->rule.ifname[0] != '\0') {
 		luaL_addstring(&b, " on ");
-		luaL_addstring(&b, r->rule.ifname);
+		addbounded(&b, r->rule.ifname, sizeof(r->rule.ifname));
 	}
 
 	if (r->rule.af == AF_INET)
@@ -619,7 +648,7 @@ pfruletostring(lua_State *L)
 
 	if (r->rule.label[0] != '\0') {
 		luaL_addstring(&b, " label \"");
-		luaL_addstring(&b, r->rule.label);
+		addbounded(&b, r->rule.label, sizeof(r->rule.label));
 		luaL_addchar(&b, '"');
 	}
 
@@ -692,9 +721,10 @@ pfrules(lua_State *L)
 
 		r->rule = pr->rule;
 		r->nr = pr->nr;
-		strlcpy(r->anchor, pr->anchor, sizeof(r->anchor));
-		strlcpy(r->anchor_call, pr->anchor_call,
-		        sizeof(r->anchor_call));
+		copybounded(r->anchor, sizeof(r->anchor), pr->anchor,
+		            sizeof(pr->anchor));
+		copybounded(r->anchor_call, sizeof(r->anchor_call),
+		            pr->anchor_call, sizeof(pr->anchor_call));
 
 		lua_rawseti(L, -2, n++);
 	}

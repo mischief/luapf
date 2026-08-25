@@ -2,6 +2,7 @@
 #include <errno.h>
 #include <limits.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <sys/ioctl.h>
@@ -22,6 +23,12 @@
 
 /* An anchor tree deeper or wider than this is a bug, not a configuration. */
 enum { maxanchors = 4096 };
+
+static int
+cmpname(const void *a, const void *b)
+{
+	return strcmp(*(const char *const *)a, *(const char *const *)b);
+}
 
 static void
 childpath(lua_State *L, char *dst, size_t dstlen, const char *path,
@@ -103,6 +110,7 @@ pfanchors(lua_State *L)
 {
 	struct luapf *pf = luaL_checkudata(L, 1, PF_MT);
 	const char *root = luaL_optstring(L, 2, "");
+	const char **names;
 	int found = 0;
 	int pidx, ridx;
 
@@ -132,14 +140,28 @@ pfanchors(lua_State *L)
 		lua_pop(L, 1);
 	}
 
-	/* Sorted, so the order matches pfctl -s Anchors and is reproducible. */
-	lua_getglobal(L, "table");
-	lua_getfield(L, -1, "sort");
-	lua_pushvalue(L, ridx);
-	lua_call(L, 1, 0);
-	lua_pop(L, 1);
+	/*
+	 * Sort in C, not through the table.sort global, which a caller can
+	 * shadow. The names stay owned by the result table, so the pointers
+	 * remain valid until that table is replaced below.
+	 */
+	names = lua_newuserdata(L, (size_t)found * sizeof(*names) + 1);
 
-	lua_pushvalue(L, ridx);
+	for (int i = 0; i < found; i++) {
+		lua_rawgeti(L, ridx, i + 1);
+		names[i] = lua_tostring(L, -1);
+		lua_pop(L, 1);
+	}
+
+	qsort(names, (size_t)found, sizeof(*names), cmpname);
+
+	/* The order matches pfctl -s Anchors and is reproducible. */
+	lua_newtable(L);
+
+	for (int i = 0; i < found; i++) {
+		lua_pushstring(L, names[i]);
+		lua_rawseti(L, -2, i + 1);
+	}
 
 	return 1;
 }

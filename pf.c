@@ -32,6 +32,32 @@ working after a privilege drop and is refused every write.
 @usage local pf = require("pf")
 */
 
+/* Idempotent, so __gc, __close and pf:close can all land on it. */
+static void
+pfrelease(struct luapf *pf)
+{
+	if (pf->fd >= 0) {
+		(void)close(pf->fd);
+		pf->fd = -1;
+	}
+}
+
+/*
+ * An explicit close leaves a live handle behind with no descriptor, so
+ * every method has to refuse it rather than hand ioctl a -1, or a number
+ * the kernel has since given to some other file.
+ */
+static struct luapf *
+checkpf(lua_State *L)
+{
+	struct luapf *pf = luaL_checkudata(L, 1, PF_MT);
+
+	if (pf->fd < 0)
+		luaL_error(L, "pf handle closed");
+
+	return pf;
+}
+
 /***
 Start pf.
 @function pf:start
@@ -40,7 +66,7 @@ Start pf.
 static int
 pfstart(lua_State *L)
 {
-	struct luapf *pf = luaL_checkudata(L, 1, PF_MT);
+	struct luapf *pf = checkpf(L);
 	int x = 0;
 
 	if (ioctl(pf->fd, DIOCSTART, &x) < 0)
@@ -57,7 +83,7 @@ Stop pf.
 static int
 pfstop(lua_State *L)
 {
-	struct luapf *pf = luaL_checkudata(L, 1, PF_MT);
+	struct luapf *pf = checkpf(L);
 	int x = 0;
 
 	if (ioctl(pf->fd, DIOCSTOP, &x) < 0)
@@ -79,7 +105,7 @@ checksum, plus counters, bcounters and pcounters tables.
 static int
 pfstatus(lua_State *L)
 {
-	struct luapf *pf = luaL_checkudata(L, 1, PF_MT);
+	struct luapf *pf = checkpf(L);
 	struct pf_status st;
 	char hash[PF_MD5_DIGEST_LENGTH * 2 + 1];
 	const uint8_t *c;
@@ -191,7 +217,7 @@ is a state object.
 static int
 pfstates(lua_State *L)
 {
-	struct luapf *pf = luaL_checkudata(L, 1, PF_MT);
+	struct luapf *pf = checkpf(L);
 	struct pfioc_states *ps;
 
 	ps = lua_newuserdata(L, sizeof(*ps));
@@ -204,9 +230,13 @@ pfstates(lua_State *L)
 	if (ioctl(pf->fd, DIOCGETSTATES, ps) == -1)
 		luaL_error(L, "DIOCGETSTATES: %s", strerror(errno));
 
+	/* No states: leave a null buffer, which reads as an empty list. */
+	if (ps->ps_len == 0)
+		return 1;
+
 	ps->ps_buf = malloc(ps->ps_len);
 	if (!ps->ps_buf)
-		luaL_error(L, "DIOCGETSTATES: %s", strerror(errno));
+		luaL_error(L, "DIOCGETSTATES: out of memory");
 
 	if (ioctl(pf->fd, DIOCGETSTATES, ps) == -1)
 		luaL_error(L, "DIOCGETSTATES: %s", strerror(errno));
@@ -225,7 +255,7 @@ Kill one state by id.
 static int
 pfkillstates(lua_State *L)
 {
-	struct luapf *pf = luaL_checkudata(L, 1, PF_MT);
+	struct luapf *pf = checkpf(L);
 	lua_Integer id = luaL_checkinteger(L, 2);
 	struct pfioc_state_kill psk;
 
@@ -250,7 +280,7 @@ Zero the global counters, or the counters of one interface.
 static int
 pfclearstatus(lua_State *L)
 {
-	struct luapf *pf = luaL_checkudata(L, 1, PF_MT);
+	struct luapf *pf = checkpf(L);
 	const char *ifname = luaL_optstring(L, 2, "");
 	struct pfioc_iface pi;
 
@@ -266,15 +296,35 @@ pfclearstatus(lua_State *L)
 	return 0;
 }
 
+/***
+Close the descriptor.
+
+Every later call on the handle raises. Collection closes an open handle
+anyway, but that happens at an unpredictable time, and descriptors run
+out.
+@function pf:close
+*/
+static int
+pfclose(lua_State *L)
+{
+	struct luapf *pf = luaL_checkudata(L, 1, PF_MT);
+
+	pfrelease(pf);
+
+	return 0;
+}
+
+/*
+ * __gc and __close both run on a handle that may already be released, and
+ * neither may raise. They must not touch another userdata's descriptor
+ * either, because finalizer order is unspecified.
+ */
 static int
 pfgc(lua_State *L)
 {
 	struct luapf *pf = luaL_checkudata(L, 1, PF_MT);
 
-	if (pf->fd >= 0) {
-		(void)close(pf->fd);
-		pf->fd = -1;
-	}
+	pfrelease(pf);
 
 	return 0;
 }
@@ -310,34 +360,55 @@ static const luaL_Reg pfmethods[] = {
     {"deletetables",   pfdeletetables  },
     {"clearalltables", pfclearalltables},
 
+    {"close",          pfclose         },
+
     {NULL,             NULL            },
 };
 
 static const luaL_Reg pfmeta[] = {
-    {"__gc", pfgc},
-    {NULL,   NULL},
+    {"__gc",    pfgc},
+    {"__close", pfgc},
+    {NULL,      NULL},
 };
 
 /***
 Open /dev/pf.
+
+The mode is "rw" by default. A "r" handle answers every read ioctl and is
+refused every write, which is what a process wants to keep across a
+privilege drop.
 @function pf.open
+@string[opt="rw"] mode "r" or "rw"
 @treturn userdata handle
-@raise if /dev/pf cannot be opened
-@usage local h = pf.open()
+@raise if the mode is unknown, or /dev/pf cannot be opened
+@usage local h = pf.open("r")
 */
 static int
 pfopen(lua_State *L)
 {
+	const char *mode = luaL_optstring(L, 1, "rw");
 	struct luapf *pf;
-	int fd;
+	int flags;
 
-	fd = open("/dev/pf", O_RDWR | O_CLOEXEC);
-	if (fd < 0)
-		luaL_error(L, "open /dev/pf: %s", strerror(errno));
+	if (strcmp(mode, "r") == 0)
+		flags = O_RDONLY;
+	else if (strcmp(mode, "rw") == 0)
+		flags = O_RDWR;
+	else
+		return luaL_error(L, "bad mode \"%s\", want \"r\" or \"rw\"",
+		                  mode);
 
+	/*
+	 * The userdata comes first, with the metatable that arms __gc, so a
+	 * failure past this point cannot strand an open descriptor.
+	 */
 	pf = lua_newuserdata(L, sizeof(*pf));
+	pf->fd = -1;
 	luaL_setmetatable(L, PF_MT);
-	pf->fd = fd;
+
+	pf->fd = open("/dev/pf", flags | O_CLOEXEC);
+	if (pf->fd < 0)
+		luaL_error(L, "open /dev/pf: %s", strerror(errno));
 
 	return 1;
 }
@@ -346,12 +417,12 @@ pfopen(lua_State *L)
 Adopt a descriptor already open on /dev/pf.
 
 Lets a process open /dev/pf while privileged and keep reading after it
-drops. The descriptor is checked with DIOCGETSTATUS, and the handle closes
-it on collection.
+drops. The descriptor is checked with DIOCGETSTATUS and duplicated; the
+caller keeps its own and stays responsible for closing it.
 @function pf.openfd
 @int fd
 @treturn userdata handle
-@raise if the descriptor is not /dev/pf
+@raise if the descriptor is not /dev/pf, or cannot be duplicated
 */
 static int
 pfopenfd(lua_State *L)
@@ -367,9 +438,18 @@ pfopenfd(lua_State *L)
 		luaL_error(L, "descriptor %d is not /dev/pf: %s", fd,
 		           strerror(errno));
 
+	/*
+	 * The probe says what the descriptor is, never who owns it. Own a
+	 * duplicate instead, so __gc cannot close a descriptor the caller
+	 * still uses and a reused number cannot be written by mistake.
+	 */
 	pf = lua_newuserdata(L, sizeof(*pf));
+	pf->fd = -1;
 	luaL_setmetatable(L, PF_MT);
-	pf->fd = fd;
+
+	pf->fd = fcntl(fd, F_DUPFD_CLOEXEC, 0);
+	if (pf->fd < 0)
+		luaL_error(L, "dup descriptor %d: %s", fd, strerror(errno));
 
 	return 1;
 }

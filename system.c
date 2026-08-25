@@ -212,7 +212,12 @@ pfinterfaces(lua_State *L)
 
 		lua_newtable(L);
 
-		lua_pushstring(L, k->pfik_name);
+		/*
+		 * A kernel name field can fill its array with no NUL, so
+		 * bound every such read to the size of the array itself.
+		 */
+		lua_pushlstring(L, k->pfik_name,
+		                strnlen(k->pfik_name, sizeof(k->pfik_name)));
 		lua_setfield(L, -2, "name");
 		lua_pushboolean(L, (k->pfik_flags & PFI_IFLAG_SKIP) != 0);
 		lua_setfield(L, -2, "skip");

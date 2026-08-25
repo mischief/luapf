@@ -274,6 +274,9 @@ pftablereplace(lua_State *L)
 	memset(&pt, 0, sizeof(pt));
 	settablename(&pt, lpft->table);
 
+	luaL_argcheck(L, (lua_istable(L, 2) || lua_isstring(L, 2)), 2,
+	              "expected table or string");
+
 	argstoaddrs(L, &pt);
 
 	if (ioctl(pf->fd, DIOCRSETADDRS, &pt) < 0)
@@ -476,6 +479,9 @@ argstoaddrs(lua_State *L, struct pfioc_table *pt)
 
 	pt->pfrio_esize = sizeof(struct pfr_addr);
 
+	luaL_argcheck(L, (lua_istable(L, 2) || lua_isstring(L, 2)), 2,
+	              "expected table or string");
+
 	len = lua_rawlen(L, 2);
 
 	if (lua_isstring(L, 2)) {
@@ -489,7 +495,11 @@ argstoaddrs(lua_State *L, struct pfioc_table *pt)
 		strtoaddr(L, s, ap);
 		pt->pfrio_buffer = ap;
 		pt->pfrio_size = 1;
-	} else if (lua_istable(L, 2)) {
+	} else {
+		/* pfrio_size is an int, so a longer array would truncate. */
+		luaL_argcheck(L, (len <= (size_t)INT_MAX), 2,
+		              "too many addresses");
+
 		ap = lua_newuserdata(L, len * sizeof(*ap));
 		memset(ap, 0, len * sizeof(*ap));
 		for (i = 0; i < len; i++) {
@@ -533,6 +543,9 @@ pftableadd(lua_State *L)
 	strlcpy(pt.pfrio_table.pfrt_name, lpft->table->pfrt_name,
 	        sizeof(pt.pfrio_table.pfrt_name));
 
+	luaL_argcheck(L, (lua_istable(L, 2) || lua_isstring(L, 2)), 2,
+	              "expected table or string");
+
 	argstoaddrs(L, &pt);
 
 	if (ioctl(pf->fd, DIOCRADDADDRS, &pt) < 0)
@@ -566,6 +579,9 @@ pftabledelete(lua_State *L)
 	        sizeof(pt.pfrio_table.pfrt_anchor));
 	strlcpy(pt.pfrio_table.pfrt_name, lpft->table->pfrt_name,
 	        sizeof(pt.pfrio_table.pfrt_name));
+
+	luaL_argcheck(L, (lua_istable(L, 2) || lua_isstring(L, 2)), 2,
+	              "expected table or string");
 
 	argstoaddrs(L, &pt);
 
@@ -1041,6 +1057,9 @@ argstotables(lua_State *L, struct pfioc_table *pt)
 
 	pt->pfrio_esize = sizeof(struct pfr_table);
 
+	luaL_argcheck(L, (lua_istable(L, 2) || lua_isstring(L, 2)), 2,
+	              "expected table or string");
+
 	len = lua_rawlen(L, 2);
 
 	if (lua_isstring(L, 2)) {
@@ -1053,7 +1072,11 @@ argstotables(lua_State *L, struct pfioc_table *pt)
 		strtotable(L, s, tp);
 		pt->pfrio_buffer = tp;
 		pt->pfrio_size = 1;
-	} else if (lua_istable(L, 2)) {
+	} else {
+		/* pfrio_size is an int, so a longer array would truncate. */
+		luaL_argcheck(L, (len <= (size_t)INT_MAX), 2,
+		              "too many table names");
+
 		tp = lua_newuserdata(L, len * sizeof(*tp));
 		memset(tp, 0, len * sizeof(*tp));
 		for (i = 0; i < len; i++) {

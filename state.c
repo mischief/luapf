@@ -1,5 +1,4 @@
 /* SPDX-License-Identifier: ISC */
-#include <assert.h>
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
@@ -38,8 +37,7 @@ cacheprotoent(uint8_t proto)
 	if (p == NULL)
 		return NULL;
 
-	assert(strlen(p->p_name) < maxprotosize);
-
+	/* A name longer than the cache slot is truncated, not rejected. */
 	strlcpy(protocache[proto], p->p_name, maxprotosize);
 
 	return protocache[proto];
@@ -70,7 +68,12 @@ state_ifname(lua_State *L, int idx)
 {
 	struct pfsync_state *s = luaL_checkudata(L, idx, PFSTATE_MT);
 
-	lua_pushstring(L, s->ifname);
+	/*
+	 * The kernel need not NUL terminate a fixed-size character array, so
+	 * bound the read by the size of the array itself. sizeof on a
+	 * pointer would measure the pointer.
+	 */
+	lua_pushlstring(L, s->ifname, strnlen(s->ifname, sizeof(s->ifname)));
 
 	return 1;
 }
