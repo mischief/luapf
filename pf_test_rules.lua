@@ -22,6 +22,21 @@ local properties = {
 	"anchor_call",
 	"source", "destination", "evaluations", "packets_in", "packets_out",
 	"bytes_in", "bytes_out", "states_cur", "states_total",
+	"user", "group", "flags",
+	"redirect", "redirect_address", "redirect_port", "redirect_port_end",
+	"pool_type", "sticky_address", "static_port",
+}
+
+-- Every pool type rule.c can name.
+local pooltypes = {
+	["bitmask"] = true, ["random"] = true, ["source-hash"] = true,
+	["round-robin"] = true, ["least-states"] = true,
+}
+
+-- Every translation keyword rule.c can name.
+local redirects = {
+	["nat-to"] = true, ["af-to"] = true, ["rdr-to"] = true,
+	["route-to"] = true, ["reply-to"] = true, ["dup-to"] = true,
 }
 
 local function isuint(v)
@@ -98,6 +113,76 @@ local function checkrule(r, anchor)
 	if r.label ~= "" then
 		assert(text:find('label "' .. r.label .. '"', 1, true),
 		    "no label in: " .. text)
+	end
+
+	-- A rule that constrains a user or a group renders the comparison the
+	-- same way in the text and in the property.
+	assert(r.user == nil or type(r.user) == "string")
+	assert(r.group == nil or type(r.group) == "string")
+	if r.user then
+		assert(text:find(" user " .. r.user, 1, true),
+		    "no user in: " .. text)
+	end
+	if r.group then
+		assert(text:find(" group " .. r.group, 1, true),
+		    "no group in: " .. text)
+	end
+
+	-- pf stores the flags a packet must have and the flags it looks at,
+	-- so a flag the rule requires must be one it inspects.
+	if r.flags then
+		assert(type(r.flags) == "string")
+		local want, mask = r.flags:match("^([FSRPAUEW]*)/([FSRPAUEW]*)$")
+		assert(mask, "malformed flags: " .. r.flags)
+		for c in want:gmatch(".") do
+			assert(mask:find(c, 1, true),
+			    "rule requires flag " .. c .. " it never reads")
+		end
+		assert(text:find(" flags " .. r.flags, 1, true),
+		    "no flags in: " .. text)
+	end
+
+	-- The translation pool. Every part of it is absent together.
+	assert(type(r.sticky_address) == "boolean")
+	assert(type(r.static_port) == "boolean")
+	assert(r.pool_type == nil or pooltypes[r.pool_type],
+	    "unknown pool type: " .. tostring(r.pool_type))
+	if r.redirect == nil then
+		assert(r.redirect_address == nil)
+		assert(r.redirect_port == nil)
+		assert(r.redirect_port_end == nil)
+		assert(r.pool_type == nil)
+		assert(not r.sticky_address and not r.static_port)
+	else
+		assert(redirects[r.redirect],
+		    "unknown redirect: " .. tostring(r.redirect))
+		assert(type(r.redirect_address) == "string" and
+		    #r.redirect_address > 0)
+		assert(text:find(" " .. r.redirect .. " " ..
+		    r.redirect_address, 1, true),
+		    "no " .. r.redirect .. " in: " .. text)
+		-- A pool that reports no first port cannot report a last one,
+		-- and a range that has a top has it above the bottom.
+		if r.redirect_port == nil then
+			assert(r.redirect_port_end == nil)
+		else
+			assert(isuint(r.redirect_port) and
+			    r.redirect_port <= 65535)
+			if r.redirect_port_end then
+				assert(isuint(r.redirect_port_end) and
+				    r.redirect_port_end <= 65535)
+				assert(r.redirect_port_end ~=
+				    r.redirect_port)
+			end
+		end
+		if r.pool_type then
+			assert(text:find(" " .. r.pool_type, 1, true),
+			    "no pool type in: " .. text)
+		end
+		assert(r.sticky_address ==
+		    (text:find(" sticky-address", 1, true) ~= nil))
+		assert(r.static_port ==
+		    (text:find(" static-port", 1, true) ~= nil))
 	end
 
 	-- Counters. A live host keeps incrementing these, so nothing here
