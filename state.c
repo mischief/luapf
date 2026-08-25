@@ -165,10 +165,11 @@ gimmekey(lua_State *L, const struct pfsync_state *s, int idx,
 {
 	const struct pfsync_state_key *key;
 
-	/* XXX: af-to states have two address families and are not handled. */
-	if (s->key[PF_SK_STACK].af != s->key[PF_SK_WIRE].af)
-		luaL_error(L, "what even is af-to");
-
+	/*
+	 * The two keys of an af-to state carry different families, which is
+	 * fine: the family travels with the key, so each address is rendered
+	 * as whatever it actually is.
+	 */
 	switch (s->direction) {
 	case PF_IN:
 		key = &s->key[PF_SK_STACK];
@@ -214,6 +215,26 @@ pushhostport(lua_State *L, sa_family_t af, const struct pf_addr *a,
  * reads. Two states in different routing domains may carry the same
  * addresses and ports, so a key is only unique together with its rdomain.
  */
+/*
+ * An af-to state translates between families, and the kernel mirrors the
+ * two keys when it does: the end that is addr[1] in one key is addr[0] in
+ * the other. pfctl inverts the same index and prints an inbound af-to
+ * state with the outbound arrow, which is the same statement -- for
+ * indexing, an inbound af-to state reads as an outbound one.
+ */
+static int
+stateafto(const struct pfsync_state *s)
+{
+	return s->key[PF_SK_STACK].af != s->key[PF_SK_WIRE].af;
+}
+
+/* True when the state indexes its keys the way an outbound state does. */
+static int
+stateoutward(const struct pfsync_state *s)
+{
+	return (int)s->direction == PF_OUT || stateafto(s);
+}
+
 static const struct pfsync_state_key *
 directionkey(const struct pfsync_state *s, int other)
 {
@@ -253,6 +274,12 @@ pushkeyhost(lua_State *L, const struct pfsync_state *s, int wire, int nearend)
 	const struct pfsync_state_key *key =
 	    &s->key[wire ? PF_SK_WIRE : PF_SK_STACK];
 	int i = nearend ? 1 : 0;
+
+	/* The other key holds this end at the opposite index when the
+	 * families differ, so pairing by index alone would name the far
+	 * end here and the near end there. */
+	if (stateafto(s) && key != directionkey(s, 0))
+		i = !i;
 
 	return pushhostport(L, key->af, &key->addr[i], be16toh(key->port[i]));
 }
@@ -297,7 +324,7 @@ state_source(lua_State *L, int idx)
 	uint16_t p;
 	sa_family_t af;
 
-	gimmekey(L, s, s->direction == PF_OUT ? 1 : 0, &a, &p, &af);
+	gimmekey(L, s, stateoutward(s) ? 1 : 0, &a, &p, &af);
 
 	return pushhostport(L, af, a, p);
 }
@@ -310,7 +337,7 @@ state_destination(lua_State *L, int idx)
 	uint16_t p;
 	sa_family_t af;
 
-	gimmekey(L, s, s->direction == PF_OUT ? 0 : 1, &a, &p, &af);
+	gimmekey(L, s, stateoutward(s) ? 0 : 1, &a, &p, &af);
 
 	return pushhostport(L, af, a, p);
 }
@@ -334,9 +361,10 @@ state_gateway(lua_State *L, int idx)
 {
 	struct pfsync_state *s = luaL_checkudata(L, idx, PFSTATE_MT);
 	const struct pfsync_state_key *other = directionkey(s, 1);
+	int i = stateafto(s) ? 0 : 1;
 
-	return pushhostport(L, other->af, &other->addr[1],
-	                    be16toh(other->port[1]));
+	return pushhostport(L, other->af, &other->addr[i],
+	                    be16toh(other->port[i]));
 }
 
 /*
@@ -1008,6 +1036,19 @@ PF this host and the hosts behind it are on, the far end the other side,
 and neither moves with direction. An end is translated when its wire and
 stack readings differ. gateway names one translated end, so a flow that
 nat-to and rdr-to have both translated can only be read from these four.
+A rule that translates between address families makes the two readings of
+one end differ in family as well as address, and the near/far pairing is
+what holds them together. A NAT64 flow reads:
+
+    near_stack  10.64.0.1:65154     far_stack  10.64.0.2:9999
+    near_wire   [fd00:64::2]:1179   far_wire   [64:ff9b::2]:9999
+
+source and destination are the stack pair here and gateway the near wire,
+so the seven names carry four values. far_wire is the one with no
+direction-relative name, and it is exactly what gateway cannot reach.
+Comparing against pfctl, note it prints an inbound af-to state with the
+outbound arrow.
+
 rdomain is the routing domain source and destination sit in, and
 gateway_rdomain the one gateway sits in. Addresses carry no rdomain of
 their own, so two states in different routing domains may report the same

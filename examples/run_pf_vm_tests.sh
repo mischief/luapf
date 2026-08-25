@@ -14,6 +14,9 @@ root=$(cd "$selfdir/.." && pwd)
 base=${1:-"$root/.vm/luapf-pf-test-base.qcow2"}
 overlay=${2:-"$root/.vm/luapf-pf-test-run.qcow2"}
 network=${3:-isolated}
+# LUAPF_VM_KERNEL boots a kernel of your own instead of the one on the
+# disk, which is how a change to pf(4) gets tested against these tests.
+kernel=${LUAPF_VM_KERNEL:-}
 # Named after the overlay, not a fixed string: two runs sharing a VM name
 # would collide in vmctl, and the second would read the first's serial tty
 # out from under it (the tty is discovered by name below).
@@ -99,11 +102,10 @@ esac
 git -C "$root" ls-files -co --exclude-standard | tar -C "$root" -czf "$archive" -I -
 doas vmctl create -b "$base" "$overlay"
 created_overlay=true
-if $use_uplink; then
-	doas vmctl start -m 1G -d "$overlay" -n uplink "$name"
-else
-	doas vmctl start -m 1G -d "$overlay" "$name"
-fi
+set -A startargs -- -m 1G -d "$overlay"
+[[ -n $kernel ]] && set -A startargs -- "${startargs[@]}" -b "$kernel"
+$use_uplink && set -A startargs -- "${startargs[@]}" -n uplink
+doas vmctl start "${startargs[@]}" "$name"
 started=true
 
 # vmctl start returns once vmd accepted the guest, which is before vmd has

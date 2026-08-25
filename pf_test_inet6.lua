@@ -176,5 +176,70 @@ for _, t in ipairs(h:tables()) do
 end
 assert(found, "the v6 table is missing")
 
+-- NAT64: the one state shape whose two keys carry different families.
+-- The kernel mirrors the key indices when it translates between them, so
+-- an end that is addr[1] on one side is addr[0] on the other. Reading it
+-- without that inversion pairs the sender with the receiver.
+must("ifconfig pair12 create")
+must("ifconfig pair13 create")
+must("ifconfig pair12 patch pair13")
+must("ifconfig pair13 rdomain 13")
+must("ifconfig pair12 inet 10.64.0.1/24 up")
+must("ifconfig pair12 inet6 fd00:64::1/64")
+must("ifconfig pair13 inet6 fd00:64::2/64")
+sh("sysctl net.inet.ip.forwarding=1 net.inet6.ip6.forwarding=1")
+sh("sleep 3")
+sh("route -T 13 add -inet6 64:ff9b::/96 fd00:64::1")
+
+local afconf = assert(io.open("/tmp/pf_test_afto.conf", "w"))
+afconf:write("set skip on lo0\n" ..
+    "pass in log quick on pair12 inet6 from any to 64:ff9b::/96 " ..
+    "af-to inet from 10.64.0.1 to 10.64.0.2\n" ..
+    "pass log all\n")
+afconf:close()
+assert(sh("pfctl -f /tmp/pf_test_afto.conf") == "",
+    "pfctl rejected the af-to ruleset")
+
+assert(h:clearstates() >= 0)
+sh("echo probe | route -T 13 exec nc -u -w 1 64:ff9b::2 9999")
+sh("sleep 1")
+
+local afto
+for _, s in ipairs(h:states()) do
+	-- Two families show as one end bracketed and the other not.
+	if (s.near_wire:sub(1, 1) == "[") ~= (s.near_stack:sub(1, 1) == "[")
+	    and s.proto == "udp" then
+		afto = s
+	end
+end
+assert(afto, "no af-to state after sending through the translator")
+
+-- Each pair has to name one endpoint, not one index. The sender is v4
+-- on the stack and v6 on the wire; so is the receiver.
+assert(afto.near_stack == "10.64.0.1:" .. afto.near_stack:match(":(%d+)$"),
+    "near_stack is not the translated source: " .. afto.near_stack)
+assert(afto.far_stack == "10.64.0.2:9999",
+    "far_stack is not the translated destination: " .. afto.far_stack)
+assert(afto.near_wire:find("^%[fd00:64::2%]:"),
+    "near_wire is not the original source: " .. afto.near_wire)
+assert(afto.far_wire == "[64:ff9b::2]:9999",
+    "far_wire is not the original destination: " .. afto.far_wire)
+
+-- The direction-relative reading agrees with the same four.
+assert(afto.source == afto.near_stack,
+    "source disagrees with near_stack: " .. afto.source)
+assert(afto.destination == afto.far_stack,
+    "destination disagrees with far_stack: " .. afto.destination)
+assert(afto.gateway == afto.near_wire,
+    "gateway disagrees with near_wire: " .. afto.gateway)
+
+-- Reading every state must not raise: this used to stop at the first
+-- af-to state, which made the whole state list unusable on a translator.
+for _, s in ipairs(h:states()) do
+	assert(type(s.source) == "string")
+	assert(type(s.destination) == "string")
+end
+
+os.remove("/tmp/pf_test_afto.conf")
 os.remove("/tmp/pf_test_inet6.conf")
 sh("printf '%s\\n' 'pass log' | pfctl -f -")
