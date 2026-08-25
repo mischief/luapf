@@ -14,10 +14,17 @@ enable and disable PF, kill states, load rulesets and build interfaces.
 Disturbing PF is the point, and the overlay is discarded afterwards.
 
     meson test -C build --print-errorlogs
-    ./examples/run_pf_vm_tests.sh .vm/luapf-pf-test-base-vmd.qcow2 .vm/run.qcow2 isolated
+    ./examples/run_pf_vm_tests.sh
 
 Guests are named after their overlay, so several may run at once as long
-as each is given its own.
+as each is given its own:
+
+    ./examples/run_pf_vm_tests.sh .vm/luapf-pf-test-base.qcow2 .vm/mine.qcow2 isolated
+
+There is one base image and every run takes an overlay of it. Keep it
+named what the scripts default to, or a run with no arguments will not
+find it -- and the builder, given no arguments, will cheerfully build a
+second one beside it.
 
 ## Host configuration
 
@@ -86,7 +93,10 @@ and needs no console interaction:
 
     ./examples/build_test_vm_base.sh "$PWD/build/autoinstall-httpd" \
         "$PWD/build/autoinstall-httpd/pub/OpenBSD/7.9/amd64/bsd.rd" \
-        "$PWD/.vm/luapf-pf-test-base-vmd.qcow2" luapf-pf-test-bootstrap
+        "$PWD/.vm/luapf-pf-test-base.qcow2" luapf-pf-test-bootstrap
+
+It refuses to overwrite an image that already exists, so move the old one
+aside first.
 
 Two messages during the build are expected and not failures: the
 `site79.tgz` checksum warning, because that set is generated here rather
