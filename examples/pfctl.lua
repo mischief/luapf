@@ -101,10 +101,9 @@ end
 
 function show.Anchors()
 	for _, a in ipairs(h:anchors(opt.anchor)) do
-		-- pfctl hides the inline anchors, whose names begin with an
-		-- underscore, unless it is being verbose.
-		local last = a:match("([^/]+)$")
-		if opt.verbose > 0 or last:sub(1, 1) ~= "_" then
+		-- The inline anchors, whose names begin with an underscore,
+		-- are never listed here. -v means recurse, not show these.
+		if a:match("([^/]+)$"):sub(1, 1) ~= "_" then
 			print("  " .. a)
 		end
 	end
@@ -118,7 +117,7 @@ end
 
 function show.Interfaces()
 	for _, iface in ipairs(h:interfaces()) do
-		print(iface.name)
+		print(iface.name .. (iface.skip and " (skip)" or ""))
 	end
 end
 
@@ -212,9 +211,81 @@ local function stateline(s)
 	return table.concat(out, " ") .. "       " .. levels
 end
 
+local function hms(t)
+	return string.format("%.2d:%.2d:%.2d", t // 3600, (t % 3600) // 60,
+	    t % 60)
+end
+
+-- The window a peer is allowed, as pfctl writes it: where it starts and
+-- how wide it is, with the modulation offset when one is in use.
+local function seq(lo, hi, diff)
+	if diff ~= 0 then
+		return string.format("[%u + %u](+%u)", lo, hi - lo, diff)
+	end
+	return string.format("[%u + %u]", lo, hi - lo)
+end
+
+local function verbosestate(s)
+	local out = {}
+
+	if s.proto == "tcp" then
+		-- Ordered by direction, the same way the peer levels are:
+		-- an inbound state shows the far end's window first.
+		local outward = s.direction == "out"
+		local alo = outward and s.src_seqlo or s.dst_seqlo
+		local ahi = outward and s.src_seqhi or s.dst_seqhi
+		local ad = outward and s.src_seqdiff or s.dst_seqdiff
+		local aw = outward and s.src_wscale or s.dst_wscale
+		local blo = outward and s.dst_seqlo or s.src_seqlo
+		local bhi = outward and s.dst_seqhi or s.src_seqhi
+		local bd = outward and s.dst_seqdiff or s.src_seqdiff
+		local bw = outward and s.dst_wscale or s.src_wscale
+		-- A scale is only meaningful when both ends negotiated one.
+		local scaled = s.src_wscale ~= 0 and s.dst_wscale ~= 0
+		local line = "   " .. seq(alo, ahi, ad) ..
+		    (scaled and (" wscale " .. aw) or "") ..
+		    "  " .. seq(blo, bhi, bd) ..
+		    (scaled and (" wscale " .. bw) or "")
+		out[#out + 1] = line
+	end
+
+	-- The counters here are the kernel's own order, the state's
+	-- direction first, which is not the in/out this binding names.
+	local fwd, rev, fb, rb
+	if s.direction == "out" then
+		fwd, rev = s.packets_out, s.packets_in
+		fb, rb = s.bytes_out, s.bytes_in
+	else
+		fwd, rev = s.packets_in, s.packets_out
+		fb, rb = s.bytes_in, s.bytes_out
+	end
+
+	local line = string.format(
+	    "   age %s, expires in %s, %d:%d pkts, %d:%d bytes",
+	    hms(s.creation), hms(s.expire), fwd, rev, fb, rb)
+	if s.anchor ~= -1 then
+		line = line .. ", anchor " .. s.anchor
+	end
+	if s.rule ~= -1 then
+		line = line .. ", rule " .. s.rule
+	end
+	for _, f in ipairs({"sloppy", "pflow", "source-track",
+	    "sticky-address"}) do
+		if (", " .. s.state_flag_names .. ","):find(",%s*" .. f .. ",") then
+			line = line .. ", " .. f
+		end
+	end
+	out[#out + 1] = line
+
+	return table.concat(out, "\n")
+end
+
 function show.states()
 	for _, s in ipairs(h:states()) do
 		print(stateline(s))
+		if opt.verbose > 0 then
+			print(verbosestate(s))
+		end
 	end
 end
 
