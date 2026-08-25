@@ -5,6 +5,9 @@
 #include <sys/ioctl.h>
 #include <sys/types.h>
 
+#include <netinet/in.h>
+#include <arpa/inet.h>
+
 #include <net/if.h>
 #include <net/pfvar.h>
 
@@ -220,6 +223,147 @@ pfsourcelimiters(lua_State *L)
 		lua_rawseti(L, -2, ++n);
 
 		id = sl.id + 1;
+	}
+
+	return 1;
+}
+
+/*
+ * A source walk asks for the entries at or after a key address, so the
+ * next batch starts one past the last address returned. Carrying out of
+ * the top of one address family moves the walk on to the next.
+ */
+static int
+addrinc(struct pf_addr *addr)
+{
+	int i;
+	uint32_t val, inc;
+
+	for (i = 3; i >= 0; i--) {
+		val = ntohl(addr->addr32[i]);
+		inc = val + 1;
+		addr->addr32[i] = htonl(inc);
+		if (inc > val)
+			return 0;
+	}
+
+	return 1;
+}
+
+static void
+pushaddress(lua_State *L, sa_family_t af, const struct pf_addr *a)
+{
+	char s[INET6_ADDRSTRLEN];
+
+	if (inet_ntop(af, a, s, sizeof(s)) == NULL)
+		luaL_error(L, "inet_ntop: %s", strerror(errno));
+
+	lua_pushstring(L, s);
+}
+
+/* Address families are spelled the way rule.c spells them. */
+static const char *
+afname(sa_family_t af)
+{
+	if (af == AF_INET)
+		return "inet";
+
+	return af == AF_INET6 ? "inet6" : "unknown";
+}
+
+/***
+Read the addresses one source limiter tracks.
+
+pfctl prints these under a source limiter for pfctl -vs Srclimiters. Each
+entry holds address, af, prefix, rdomain, inuse, limit, admitted,
+hardlimited and ratelimited. prefix is the limiter's mask for that
+address family and limit its per-address state cap, both repeated on
+every entry because the kernel returns them with the addresses.
+
+The list is ordered by address family and then by address. A limiter that
+tracks nothing answers with an empty table. A read-only handle answers
+this ioctl.
+@function pf:sources
+@tparam number id the id of a source limiter
+@treturn table array of source tables
+@raise if the id is out of range or the ioctl fails
+@usage for _, s in ipairs(h:sources(1)) do print(s.address, s.inuse) end
+*/
+int
+pfsources(lua_State *L)
+{
+	struct luapf *pf = luaL_checkudata(L, 1, PF_MT);
+	lua_Integer id = luaL_checkinteger(L, 2);
+	struct pfioc_source_entry entries[24], *e;
+	struct pfioc_source sr;
+	unsigned int prefix;
+	lua_Integer n = 0;
+	size_t used;
+
+	if (id < PF_SOURCELIM_ID_MIN || id > PF_SOURCELIM_ID_MAX)
+		luaL_error(L, "source limiter id out of range: %I", id);
+
+	memset(&sr, 0, sizeof(sr));
+	memset(entries, 0, sizeof(entries));
+
+	sr.id = (uint32_t)id;
+	sr.entry_size = sizeof(*entries);
+	sr.key = entries; /* af 0, address 0: the start of the walk */
+
+	lua_newtable(L);
+
+	for (;;) {
+		sr.entries = entries;
+		sr.entrieslen = sizeof(entries);
+
+		if (ioctl(pf->fd, DIOCGETNSOURCE, &sr) < 0) {
+			if (walkdone())
+				break;
+			luaL_error(L, "DIOCGETNSOURCE %u: %s", sr.id,
+			           strerror(errno));
+		}
+
+		/* The kernel must not report more than it was given room
+		 * for, and an empty batch would spin the walk forever. */
+		if (sr.entrieslen == 0 || sr.entrieslen > sizeof(entries) ||
+		    sr.entrieslen % sizeof(*entries) != 0)
+			luaL_error(L, "DIOCGETNSOURCE %u: bad entrieslen %zu",
+			           sr.id, sr.entrieslen);
+
+		for (used = 0, e = entries; used < sr.entrieslen;
+		     used += sizeof(*e), e++) {
+			lua_newtable(L);
+
+			pushaddress(L, e->af, &e->addr);
+			lua_setfield(L, -2, "address");
+			lua_pushstring(L, afname(e->af));
+			lua_setfield(L, -2, "af");
+			prefix = e->af == AF_INET6 ? sr.inet6_prefix
+			                           : sr.inet_prefix;
+			lua_pushinteger(L, (lua_Integer)prefix);
+			lua_setfield(L, -2, "prefix");
+			lua_pushinteger(L, (lua_Integer)e->rdomain);
+			lua_setfield(L, -2, "rdomain");
+			lua_pushinteger(L, (lua_Integer)e->inuse);
+			lua_setfield(L, -2, "inuse");
+			lua_pushinteger(L, (lua_Integer)sr.limit);
+			lua_setfield(L, -2, "limit");
+			lua_pushinteger(L, (lua_Integer)e->admitted);
+			lua_setfield(L, -2, "admitted");
+			lua_pushinteger(L, (lua_Integer)e->hardlimited);
+			lua_setfield(L, -2, "hardlimited");
+			lua_pushinteger(L, (lua_Integer)e->ratelimited);
+			lua_setfield(L, -2, "ratelimited");
+
+			lua_rawseti(L, -2, ++n);
+		}
+
+		/* Reuse the last entry read as the key for the next batch,
+		 * the way pfctl does: the kernel reads the key before it
+		 * writes over the buffer. */
+		e--;
+		e->af += addrinc(&e->addr);
+		sr.key = e;
 	}
 
 	return 1;
