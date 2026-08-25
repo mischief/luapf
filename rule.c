@@ -354,6 +354,71 @@ icmpname(uint8_t type, sa_family_t af)
 	return NULL;
 }
 
+struct icmpcode {
+	uint8_t type;
+	uint8_t code;
+	const char *name;
+};
+
+/* Only the ICMP types that carry a named code appear here; every other
+ * code prints as its number, the way pfctl prints an unnamed one. */
+static const struct icmpcode icmp4codes[] = {
+    {3,  0,  "net-unr"       },
+    {3,  1,  "host-unr"      },
+    {3,  2,  "proto-unr"     },
+    {3,  3,  "port-unr"      },
+    {3,  4,  "needfrag"      },
+    {3,  5,  "srcfail"       },
+    {3,  6,  "net-unk"       },
+    {3,  7,  "host-unk"      },
+    {3,  8,  "isolate"       },
+    {3,  9,  "net-prohib"    },
+    {3,  10, "host-prohib"   },
+    {3,  11, "net-tos"       },
+    {3,  12, "host-tos"      },
+    {3,  13, "filter-prohib" },
+    {3,  14, "host-preced"   },
+    {3,  15, "cutoff-preced" },
+    {5,  0,  "redir-net"     },
+    {5,  1,  "redir-host"    },
+    {5,  2,  "redir-tos-net" },
+    {5,  3,  "redir-tos-host"},
+    {11, 0,  "transit"       },
+    {11, 1,  "reassemb"      },
+    {12, 0,  "badhead"       },
+    {12, 1,  "optmiss"       },
+    {12, 2,  "badlen"        },
+    {40, 1,  "unknown-ind"   },
+    {40, 2,  "auth-fail"     },
+    {40, 3,  "decrypt-fail"  },
+};
+
+static const struct icmpcode icmp6codes[] = {
+    {1, 0, "noroute-unr"},
+    {1, 1, "admin-unr"  },
+    {1, 2, "beyond-unr" },
+    {1, 3, "addr-unr"   },
+    {1, 4, "port-unr"   },
+    {3, 0, "transit"    },
+    {3, 1, "reassemb"   },
+    {4, 0, "badhead"    },
+    {4, 1, "nxthdr"     },
+};
+
+static const char *
+icmpcodename(uint8_t type, uint8_t code, sa_family_t af)
+{
+	const struct icmpcode *t = af == AF_INET6 ? icmp6codes : icmp4codes;
+	size_t n = af == AF_INET6 ? sizeof(icmp6codes) / sizeof(icmp6codes[0])
+	                          : sizeof(icmp4codes) / sizeof(icmp4codes[0]);
+
+	for (size_t i = 0; i < n; i++)
+		if (t[i].type == type && t[i].code == code)
+			return t[i].name;
+
+	return NULL;
+}
+
 /* pf stores type and code one above the wire value so that zero means
  * "not set", which is why every read of them subtracts one. */
 static void
@@ -377,9 +442,84 @@ addicmp(luaL_Buffer *b, const struct pf_rule *rule)
 	}
 
 	if (rule->code != 0) {
-		snprintf(num, sizeof(num), " code %u", rule->code - 1);
-		luaL_addstring(b, num);
+		luaL_addstring(b, " code ");
+		name = icmpcodename((uint8_t)(rule->type - 1),
+		    (uint8_t)(rule->code - 1), rule->af);
+		if (name != NULL)
+			luaL_addstring(b, name);
+		else {
+			snprintf(num, sizeof(num), "%u", rule->code - 1);
+			luaL_addstring(b, num);
+		}
 	}
+}
+
+/*
+ * The ICMP answer a block rule sends back. pf keeps a v4 and a v6 code in
+ * one field each, and a rule with no address family carries both.
+ */
+static void
+addreturnicmp(luaL_Buffer *b, uint16_t v, sa_family_t af)
+{
+	const char *name = icmpcodename((uint8_t)(v >> 8), (uint8_t)(v & 255),
+	    af);
+	char num[16];
+
+	if (name != NULL) {
+		luaL_addstring(b, name);
+		return;
+	}
+
+	snprintf(num, sizeof(num), "%u", v & 255);
+	luaL_addstring(b, num);
+}
+
+static void
+addreturn(luaL_Buffer *b, const struct pf_rule *rule)
+{
+	char num[24];
+
+	if (rule->rule_flag & PFRULE_RETURN) {
+		luaL_addstring(b, " return");
+		return;
+	}
+
+	if (rule->rule_flag & PFRULE_RETURNRST) {
+		if (rule->return_ttl == 0)
+			luaL_addstring(b, " return-rst");
+		else {
+			snprintf(num, sizeof(num), " return-rst(ttl %u)",
+			    rule->return_ttl);
+			luaL_addstring(b, num);
+		}
+		return;
+	}
+
+	if ((rule->rule_flag & PFRULE_RETURNICMP) == 0) {
+		luaL_addstring(b, " drop");
+		return;
+	}
+
+	switch (rule->af) {
+	case AF_INET:
+		luaL_addstring(b, " return-icmp(");
+		addreturnicmp(b, rule->return_icmp, AF_INET);
+		break;
+	case AF_INET6:
+		luaL_addstring(b, " return-icmp6(");
+		addreturnicmp(b, rule->return_icmp6, AF_INET6);
+		break;
+	default:
+		/* Without a family the rule answers either one, so pfctl
+		 * prints both codes rather than choosing. */
+		luaL_addstring(b, " return-icmp(");
+		addreturnicmp(b, rule->return_icmp, AF_INET);
+		luaL_addstring(b, ", ");
+		addreturnicmp(b, rule->return_icmp6, AF_INET6);
+		break;
+	}
+
+	luaL_addchar(b, ')');
 }
 
 /* Appends ", " before every group member except the first. */
@@ -521,11 +661,11 @@ addstateopts(luaL_Buffer *b, const struct pf_rule *rule)
 	luaL_addchar(b, ')');
 }
 
+/* Only the keyword. pfctl puts "probability" between it and the option
+ * group, so the two halves cannot be written in one go. */
 static void
-addstate(luaL_Buffer *b, const struct pf_rule *rule, bool isanchor)
+addstatekeyword(luaL_Buffer *b, const struct pf_rule *rule, bool isanchor)
 {
-	bool opts = hasstateopts(rule);
-
 	if (rule->keep_state == 0) {
 		/* Only a pass rule can be told to keep no state; a block
 		 * rule never had any to keep. */
@@ -538,11 +678,122 @@ addstate(luaL_Buffer *b, const struct pf_rule *rule, bool isanchor)
 		luaL_addstring(b, " modulate state");
 	else if (rule->keep_state == PF_STATE_SYNPROXY)
 		luaL_addstring(b, " synproxy state");
-	else if (opts)
+	else if (hasstateopts(rule))
 		luaL_addstring(b, " keep state");
+}
 
-	if (opts)
-		addstateopts(b, rule);
+/* pf stores a probability as a fraction of the 32-bit range. pfctl turns
+ * it back into a percentage and trims the trailing zeros of "%f". */
+static void
+addprob(luaL_Buffer *b, const struct pf_rule *rule)
+{
+	char num[32];
+
+	if (rule->prob == 0)
+		return;
+
+	snprintf(num, sizeof(num), "%f",
+	    (double)rule->prob * 100.0 / ((double)UINT_MAX + 1.0));
+
+	for (int i = (int)strlen(num) - 1; i > 0; i--) {
+		if (num[i] == '0')
+			num[i] = '\0';
+		else {
+			if (num[i] == '.')
+				num[i] = '\0';
+			break;
+		}
+	}
+
+	luaL_addstring(b, " probability ");
+	luaL_addstring(b, num);
+	luaL_addchar(b, '%');
+}
+
+/* The "scrub (...)" group: what the rule rewrites in a matching packet. */
+static void
+addscrubopts(luaL_Buffer *b, const struct pf_rule *rule)
+{
+	bool first = true;
+	char num[32];
+
+	if ((rule->scrub_flags & PFSTATE_SCRUBMASK) == 0 &&
+	    rule->min_ttl == 0 && rule->max_mss == 0)
+		return;
+
+	luaL_addstring(b, " scrub (");
+
+	/* Unlike the other groups pfctl separates these with a space. */
+	if (rule->scrub_flags & PFSTATE_NODF) {
+		first = false;
+		luaL_addstring(b, "no-df");
+	}
+
+	if (rule->scrub_flags & PFSTATE_RANDOMID) {
+		luaL_addstring(b, first ? "" : " ");
+		first = false;
+		luaL_addstring(b, "random-id");
+	}
+
+	if (rule->min_ttl != 0) {
+		snprintf(num, sizeof(num), "%smin-ttl %u", first ? "" : " ",
+		    rule->min_ttl);
+		first = false;
+		luaL_addstring(b, num);
+	}
+
+	if (rule->scrub_flags & PFSTATE_SCRUB_TCP) {
+		luaL_addstring(b, first ? "" : " ");
+		first = false;
+		luaL_addstring(b, "reassemble tcp");
+	}
+
+	if (rule->max_mss != 0) {
+		snprintf(num, sizeof(num), "%smax-mss %u", first ? "" : " ",
+		    rule->max_mss);
+		luaL_addstring(b, num);
+	}
+
+	luaL_addchar(b, ')');
+}
+
+static const char *
+divertname(uint8_t type)
+{
+	switch (type) {
+	case PF_DIVERT_TO:
+		return "divert-to";
+	case PF_DIVERT_REPLY:
+		return "divert-reply";
+	case PF_DIVERT_PACKET:
+		return "divert-packet";
+	default:
+		return NULL;
+	}
+}
+
+static void
+adddivert(lua_State *L, luaL_Buffer *b, const struct pf_rule *rule)
+{
+	const char *name = divertname(rule->divert.type);
+	char num[24];
+
+	if (name == NULL)
+		return;
+
+	luaL_addchar(b, ' ');
+	luaL_addstring(b, name);
+
+	if (rule->divert.type == PF_DIVERT_TO) {
+		luaL_addchar(b, ' ');
+		addaddr(L, b, rule->af, &rule->divert.addr);
+	}
+
+	if (rule->divert.type != PF_DIVERT_REPLY) {
+		snprintf(num, sizeof(num), " port %u",
+		    ntohs(rule->divert.port));
+		luaL_addstring(b, num);
+	}
 }
 
 /* The "set (...)" group: what the rule assigns to a matching packet. */
@@ -616,13 +867,24 @@ addport(luaL_Buffer *b, const struct pf_rule_addr *ra)
 	addoperands(b, ra->port_op, ntohs(ra->port[0]), ntohs(ra->port[1]));
 }
 
-/* pfctl prints "all" when neither endpoint constrains anything. */
 static bool
-ruleisany(const struct pf_rule_addr *ra)
+addrisany(const struct pf_rule_addr *ra)
 {
 	return ra->addr.type == PF_ADDR_ADDRMASK && !ra->neg &&
 	       ra->port_op == PF_OP_NONE && addriszero(&ra->addr.v.a.addr) &&
 	       addriszero(&ra->addr.v.a.mask);
+}
+
+/*
+ * pfctl prints "all" when neither endpoint constrains anything. An OS
+ * fingerprint is written between the two endpoints, so a rule carrying one
+ * has to spell "from ... to ..." out to leave anywhere to put it.
+ */
+static bool
+ruleisany(const struct pf_rule *rule)
+{
+	return rule->os_fingerprint == PF_OSFP_ANY && addrisany(&rule->src) &&
+	       addrisany(&rule->dst);
 }
 
 static int
@@ -1127,9 +1389,519 @@ rule_keep_state(lua_State *L, int idx)
 {
 	struct luapfrule *r = luaL_checkudata(L, idx, PFRULE_MT);
 
-	lua_pushboolean(L, r->rule.keep_state != 0);
+	switch (r->rule.keep_state) {
+	case PF_STATE_NORMAL:
+		lua_pushstring(L, "normal");
+		break;
+	case PF_STATE_MODULATE:
+		lua_pushstring(L, "modulate");
+		break;
+	case PF_STATE_SYNPROXY:
+		lua_pushstring(L, "synproxy");
+		break;
+	default:
+		lua_pushnil(L);
+	}
 
 	return 1;
+}
+
+/* A field whose zero means "unset" reads better as nil than as 0. */
+static int
+pushoptint(lua_State *L, lua_Integer v)
+{
+	if (v == 0)
+		lua_pushnil(L);
+	else
+		lua_pushinteger(L, v);
+
+	return 1;
+}
+
+static int
+pushruleflag(lua_State *L, int idx, uint32_t bit)
+{
+	struct luapfrule *r = luaL_checkudata(L, idx, PFRULE_MT);
+
+	lua_pushboolean(L, (r->rule.rule_flag & bit) != 0);
+
+	return 1;
+}
+
+static int
+rule_fragment(lua_State *L, int idx)
+{
+	return pushruleflag(L, idx, PFRULE_FRAGMENT);
+}
+
+static int
+rule_no_sync(lua_State *L, int idx)
+{
+	return pushruleflag(L, idx, PFRULE_NOSYNC);
+}
+
+static int
+rule_if_bound(lua_State *L, int idx)
+{
+	return pushruleflag(L, idx, PFRULE_IFBOUND);
+}
+
+static int
+rule_sloppy(lua_State *L, int idx)
+{
+	return pushruleflag(L, idx, PFRULE_STATESLOPPY);
+}
+
+static int
+rule_pflow(lua_State *L, int idx)
+{
+	return pushruleflag(L, idx, PFRULE_PFLOW);
+}
+
+static int
+rule_once(lua_State *L, int idx)
+{
+	return pushruleflag(L, idx, PFRULE_ONCE);
+}
+
+static int
+rule_expired(lua_State *L, int idx)
+{
+	return pushruleflag(L, idx, PFRULE_EXPIRED);
+}
+
+static int
+rule_af_to(lua_State *L, int idx)
+{
+	return pushruleflag(L, idx, PFRULE_AFTO);
+}
+
+/* Which pool of source nodes the rule counts against, if it counts at all. */
+static int
+rule_source_track(lua_State *L, int idx)
+{
+	struct luapfrule *r = luaL_checkudata(L, idx, PFRULE_MT);
+
+	if ((r->rule.rule_flag & PFRULE_SRCTRACK) == 0)
+		lua_pushnil(L);
+	else
+		lua_pushstring(L,
+		    (r->rule.rule_flag & PFRULE_RULESRCTRACK) ? "rule" :
+		                                                "global");
+
+	return 1;
+}
+
+static int
+rule_delay(lua_State *L, int idx)
+{
+	struct luapfrule *r = luaL_checkudata(L, idx, PFRULE_MT);
+
+	if ((r->rule.rule_flag & PFRULE_SETDELAY) == 0)
+		lua_pushnil(L);
+	else
+		lua_pushinteger(L, (lua_Integer)r->rule.delay);
+
+	return 1;
+}
+
+static int
+rule_return_policy(lua_State *L, int idx)
+{
+	struct luapfrule *r = luaL_checkudata(L, idx, PFRULE_MT);
+
+	if (r->rule.action != PF_DROP)
+		lua_pushnil(L);
+	else if (r->rule.rule_flag & PFRULE_RETURN)
+		lua_pushstring(L, "return");
+	else if (r->rule.rule_flag & PFRULE_RETURNRST)
+		lua_pushstring(L, "return-rst");
+	else if (r->rule.rule_flag & PFRULE_RETURNICMP)
+		lua_pushstring(L, "return-icmp");
+	else
+		lua_pushstring(L, "drop");
+
+	return 1;
+}
+
+static int
+rule_return_ttl(lua_State *L, int idx)
+{
+	struct luapfrule *r = luaL_checkudata(L, idx, PFRULE_MT);
+
+	if ((r->rule.rule_flag & PFRULE_RETURNRST) == 0)
+		return pushoptint(L, 0);
+
+	return pushoptint(L, (lua_Integer)r->rule.return_ttl);
+}
+
+static int
+pushreturnicmp(lua_State *L, int idx, sa_family_t af)
+{
+	struct luapfrule *r = luaL_checkudata(L, idx, PFRULE_MT);
+	luaL_Buffer b;
+
+	if ((r->rule.rule_flag & PFRULE_RETURNICMP) == 0) {
+		lua_pushnil(L);
+		return 1;
+	}
+
+	luaL_buffinit(L, &b);
+	addreturnicmp(&b, af == AF_INET6 ? r->rule.return_icmp6 :
+	                                   r->rule.return_icmp,
+	    af);
+	luaL_pushresult(&b);
+
+	return 1;
+}
+
+static int
+rule_return_icmp(lua_State *L, int idx)
+{
+	return pushreturnicmp(L, idx, AF_INET);
+}
+
+static int
+rule_return_icmp6(lua_State *L, int idx)
+{
+	return pushreturnicmp(L, idx, AF_INET6);
+}
+
+static int
+rule_rdomain(lua_State *L, int idx)
+{
+	struct luapfrule *r = luaL_checkudata(L, idx, PFRULE_MT);
+
+	if (r->rule.onrdomain < 0)
+		lua_pushnil(L);
+	else
+		lua_pushinteger(L, (lua_Integer)r->rule.onrdomain);
+
+	return 1;
+}
+
+static int
+rule_rtable(lua_State *L, int idx)
+{
+	struct luapfrule *r = luaL_checkudata(L, idx, PFRULE_MT);
+
+	if (r->rule.rtableid < 0)
+		lua_pushnil(L);
+	else
+		lua_pushinteger(L, (lua_Integer)r->rule.rtableid);
+
+	return 1;
+}
+
+static int
+rule_probability(lua_State *L, int idx)
+{
+	struct luapfrule *r = luaL_checkudata(L, idx, PFRULE_MT);
+
+	if (r->rule.prob == 0)
+		lua_pushnil(L);
+	else
+		lua_pushnumber(L,
+		    (lua_Number)r->rule.prob * 100.0 / ((double)UINT_MAX + 1.0));
+
+	return 1;
+}
+
+static int
+rule_allow_opts(lua_State *L, int idx)
+{
+	struct luapfrule *r = luaL_checkudata(L, idx, PFRULE_MT);
+
+	lua_pushboolean(L, r->rule.allow_opts != 0);
+
+	return 1;
+}
+
+static int
+rule_min_ttl(lua_State *L, int idx)
+{
+	struct luapfrule *r = luaL_checkudata(L, idx, PFRULE_MT);
+
+	return pushoptint(L, (lua_Integer)r->rule.min_ttl);
+}
+
+static int
+rule_max_mss(lua_State *L, int idx)
+{
+	struct luapfrule *r = luaL_checkudata(L, idx, PFRULE_MT);
+
+	return pushoptint(L, (lua_Integer)r->rule.max_mss);
+}
+
+static int
+rule_tos(lua_State *L, int idx)
+{
+	struct luapfrule *r = luaL_checkudata(L, idx, PFRULE_MT);
+
+	return pushoptint(L, (lua_Integer)r->rule.tos);
+}
+
+static int
+rule_set_tos(lua_State *L, int idx)
+{
+	struct luapfrule *r = luaL_checkudata(L, idx, PFRULE_MT);
+
+	if ((r->rule.scrub_flags & PFSTATE_SETTOS) == 0)
+		lua_pushnil(L);
+	else
+		lua_pushinteger(L, (lua_Integer)r->rule.set_tos);
+
+	return 1;
+}
+
+static int
+pushscrubflag(lua_State *L, int idx, uint16_t bit)
+{
+	struct luapfrule *r = luaL_checkudata(L, idx, PFRULE_MT);
+
+	lua_pushboolean(L, (r->rule.scrub_flags & bit) != 0);
+
+	return 1;
+}
+
+static int
+rule_no_df(lua_State *L, int idx)
+{
+	return pushscrubflag(L, idx, PFSTATE_NODF);
+}
+
+static int
+rule_random_id(lua_State *L, int idx)
+{
+	return pushscrubflag(L, idx, PFSTATE_RANDOMID);
+}
+
+static int
+rule_reassemble_tcp(lua_State *L, int idx)
+{
+	return pushscrubflag(L, idx, PFSTATE_SCRUB_TCP);
+}
+
+static int
+rule_match_tag(lua_State *L, int idx)
+{
+	struct luapfrule *r = luaL_checkudata(L, idx, PFRULE_MT);
+
+	pushbounded(L, r->rule.match_tagname, sizeof(r->rule.match_tagname));
+
+	return 1;
+}
+
+/* True when the rule matches every tag EXCEPT `match_tag`. */
+static int
+rule_match_tag_not(lua_State *L, int idx)
+{
+	struct luapfrule *r = luaL_checkudata(L, idx, PFRULE_MT);
+
+	lua_pushboolean(L, r->rule.match_tag_not != 0);
+
+	return 1;
+}
+
+/*
+ * The packed fingerprint identifier, not a name: naming it needs pfctl's
+ * own numbering of /etc/pf.os, which this binding does not read. For the
+ * same reason __tostring leaves the fingerprint out of the rendered rule.
+ */
+static int
+rule_os_fingerprint(lua_State *L, int idx)
+{
+	struct luapfrule *r = luaL_checkudata(L, idx, PFRULE_MT);
+
+	if (r->rule.os_fingerprint == PF_OSFP_ANY)
+		lua_pushnil(L);
+	else
+		lua_pushinteger(L, (lua_Integer)r->rule.os_fingerprint);
+
+	return 1;
+}
+
+static int
+rule_anchor_relative(lua_State *L, int idx)
+{
+	struct luapfrule *r = luaL_checkudata(L, idx, PFRULE_MT);
+
+	lua_pushinteger(L, (lua_Integer)r->rule.anchor_relative);
+
+	return 1;
+}
+
+static int
+rule_anchor_wildcard(lua_State *L, int idx)
+{
+	struct luapfrule *r = luaL_checkudata(L, idx, PFRULE_MT);
+
+	lua_pushboolean(L, r->rule.anchor_wildcard != 0);
+
+	return 1;
+}
+
+static int
+rule_divert(lua_State *L, int idx)
+{
+	struct luapfrule *r = luaL_checkudata(L, idx, PFRULE_MT);
+	const char *name = divertname(r->rule.divert.type);
+
+	if (name == NULL)
+		lua_pushnil(L);
+	else
+		lua_pushstring(L, name);
+
+	return 1;
+}
+
+static int
+rule_divert_address(lua_State *L, int idx)
+{
+	struct luapfrule *r = luaL_checkudata(L, idx, PFRULE_MT);
+	luaL_Buffer b;
+
+	if (r->rule.divert.type != PF_DIVERT_TO) {
+		lua_pushnil(L);
+		return 1;
+	}
+
+	luaL_buffinit(L, &b);
+	addaddr(L, &b, r->rule.af, &r->rule.divert.addr);
+	luaL_pushresult(&b);
+
+	return 1;
+}
+
+static int
+rule_divert_port(lua_State *L, int idx)
+{
+	struct luapfrule *r = luaL_checkudata(L, idx, PFRULE_MT);
+
+	if (divertname(r->rule.divert.type) == NULL ||
+	    r->rule.divert.type == PF_DIVERT_REPLY)
+		lua_pushnil(L);
+	else
+		lua_pushinteger(L, (lua_Integer)ntohs(r->rule.divert.port));
+
+	return 1;
+}
+
+/*
+ * How many addresses a dynamic interface or a table resolves to right now.
+ * pfctl shows the same counts under -vv as (em0:2) and &lt;tbl:5&gt;.
+ * A table pf has not yet resolved reports -1.
+ */
+static int
+pushaddrcount(lua_State *L, const struct pf_addr_wrap *aw)
+{
+	switch (aw->type) {
+	case PF_ADDR_DYNIFTL:
+		lua_pushinteger(L, (lua_Integer)aw->p.dyncnt);
+		break;
+	case PF_ADDR_TABLE:
+		lua_pushinteger(L, (lua_Integer)aw->p.tblcnt);
+		break;
+	default:
+		lua_pushnil(L);
+	}
+
+	return 1;
+}
+
+static int
+rule_source_addresses(lua_State *L, int idx)
+{
+	struct luapfrule *r = luaL_checkudata(L, idx, PFRULE_MT);
+
+	return pushaddrcount(L, &r->rule.src.addr);
+}
+
+static int
+rule_destination_addresses(lua_State *L, int idx)
+{
+	struct luapfrule *r = luaL_checkudata(L, idx, PFRULE_MT);
+
+	return pushaddrcount(L, &r->rule.dst.addr);
+}
+
+static int
+rule_src_nodes(lua_State *L, int idx)
+{
+	struct luapfrule *r = luaL_checkudata(L, idx, PFRULE_MT);
+
+	lua_pushinteger(L, (lua_Integer)r->rule.src_nodes);
+
+	return 1;
+}
+
+static int
+rule_max_pkt_rate(lua_State *L, int idx)
+{
+	struct luapfrule *r = luaL_checkudata(L, idx, PFRULE_MT);
+
+	return pushoptint(L, (lua_Integer)r->rule.pktrate.limit);
+}
+
+static int
+rule_max_pkt_rate_seconds(lua_State *L, int idx)
+{
+	struct luapfrule *r = luaL_checkudata(L, idx, PFRULE_MT);
+
+	if (r->rule.pktrate.limit == 0)
+		lua_pushnil(L);
+	else
+		lua_pushinteger(L, (lua_Integer)r->rule.pktrate.seconds);
+
+	return 1;
+}
+
+static int
+rule_pkt_rate_count(lua_State *L, int idx)
+{
+	struct luapfrule *r = luaL_checkudata(L, idx, PFRULE_MT);
+
+	lua_pushinteger(L, (lua_Integer)r->rule.pktrate.count);
+
+	return 1;
+}
+
+static int
+rule_pkt_rate_last(lua_State *L, int idx)
+{
+	struct luapfrule *r = luaL_checkudata(L, idx, PFRULE_MT);
+
+	lua_pushinteger(L, (lua_Integer)r->rule.pktrate.last);
+
+	return 1;
+}
+
+static int
+rule_created_uid(lua_State *L, int idx)
+{
+	struct luapfrule *r = luaL_checkudata(L, idx, PFRULE_MT);
+
+	lua_pushinteger(L, (lua_Integer)r->rule.cuid);
+
+	return 1;
+}
+
+static int
+rule_created_pid(lua_State *L, int idx)
+{
+	struct luapfrule *r = luaL_checkudata(L, idx, PFRULE_MT);
+
+	lua_pushinteger(L, (lua_Integer)r->rule.cpid);
+
+	return 1;
+}
+
+static int
+rule_expires(lua_State *L, int idx)
+{
+	struct luapfrule *r = luaL_checkudata(L, idx, PFRULE_MT);
+
+	return pushoptint(L, (lua_Integer)r->rule.exptime);
 }
 
 static int
@@ -1286,6 +2058,49 @@ static const struct ro_property rule_properties[] = {
     {"pool_type",    rule_pool_type   },
     {"sticky_address", rule_sticky_address},
     {"static_port",  rule_static_port },
+    {"rdomain",      rule_rdomain     },
+    {"rtable",       rule_rtable      },
+    {"return_policy", rule_return_policy},
+    {"return_ttl",   rule_return_ttl  },
+    {"return_icmp",  rule_return_icmp },
+    {"return_icmp6", rule_return_icmp6},
+    {"fragment",     rule_fragment    },
+    {"no_sync",      rule_no_sync     },
+    {"source_track", rule_source_track},
+    {"if_bound",     rule_if_bound    },
+    {"sloppy",       rule_sloppy      },
+    {"pflow",        rule_pflow       },
+    {"once",         rule_once        },
+    {"expired",      rule_expired     },
+    {"af_to",        rule_af_to       },
+    {"delay",        rule_delay       },
+    {"probability",  rule_probability },
+    {"allow_opts",   rule_allow_opts  },
+    {"min_ttl",      rule_min_ttl     },
+    {"max_mss",      rule_max_mss     },
+    {"tos",          rule_tos         },
+    {"set_tos",      rule_set_tos     },
+    {"no_df",        rule_no_df       },
+    {"random_id",    rule_random_id   },
+    {"reassemble_tcp", rule_reassemble_tcp},
+    {"match_tag",    rule_match_tag   },
+    {"match_tag_not", rule_match_tag_not},
+    {"os_fingerprint", rule_os_fingerprint},
+    {"anchor_relative", rule_anchor_relative},
+    {"anchor_wildcard", rule_anchor_wildcard},
+    {"divert",       rule_divert      },
+    {"divert_address", rule_divert_address},
+    {"divert_port",  rule_divert_port },
+    {"source_addresses", rule_source_addresses},
+    {"destination_addresses", rule_destination_addresses},
+    {"src_nodes",    rule_src_nodes   },
+    {"max_pkt_rate", rule_max_pkt_rate},
+    {"max_pkt_rate_seconds", rule_max_pkt_rate_seconds},
+    {"pkt_rate_count", rule_pkt_rate_count},
+    {"pkt_rate_last", rule_pkt_rate_last},
+    {"created_uid",  rule_created_uid },
+    {"created_pid",  rule_created_pid },
+    {"expires",      rule_expires     },
     {NULL,           NULL             },
 };
 
@@ -1318,10 +2133,9 @@ pfrulepairs(lua_State *L)
 }
 
 /***
-Render a rule the way pfctl prints it.
-
-Rule flags and state options are left out, so the text is close to a
-pfctl -s rules line but not identical to it.
+Render a rule exactly as a pfctl -s rules line prints it, except for an OS
+fingerprint: naming one needs pfctl's own numbering of /etc/pf.os. Such a
+rule still writes "from ... to ..." rather than "all".
 @function rule:__tostring
 @treturn string
 @usage print(tostring(r)) -- block drop in log quick from &lt;bad&gt; to any
@@ -1343,16 +2157,8 @@ pfruletostring(lua_State *L)
 		luaL_addstring(&b, actionname(r->rule.action));
 	}
 
-	if (r->anchor_call[0] == '\0' && r->rule.action == PF_DROP) {
-		if (r->rule.rule_flag & PFRULE_RETURN)
-			luaL_addstring(&b, " return");
-		else if (r->rule.rule_flag & PFRULE_RETURNRST)
-			luaL_addstring(&b, " return-rst");
-		else if (r->rule.rule_flag & PFRULE_RETURNICMP)
-			luaL_addstring(&b, " return-icmp");
-		else
-			luaL_addstring(&b, " drop");
-	}
+	if (r->anchor_call[0] == '\0' && r->rule.action == PF_DROP)
+		addreturn(&b, &r->rule);
 
 	if (r->rule.direction == PF_IN)
 		luaL_addstring(&b, " in");
@@ -1374,6 +2180,16 @@ pfruletostring(lua_State *L)
 		addbounded(&b, r->rule.ifname, sizeof(r->rule.ifname));
 	}
 
+	/* A rule bound to one routing domain does not see the others, so
+	 * without this it reads as applying everywhere. */
+	if (r->rule.onrdomain >= 0) {
+		char num[32];
+
+		snprintf(num, sizeof(num), " on %srdomain %d",
+		    r->rule.ifnot ? "! " : "", r->rule.onrdomain);
+		luaL_addstring(&b, num);
+	}
+
 	if (r->rule.af == AF_INET)
 		luaL_addstring(&b, " inet");
 	else if (r->rule.af == AF_INET6)
@@ -1386,7 +2202,7 @@ pfruletostring(lua_State *L)
 		luaL_addstring(&b, p != NULL ? p->p_name : "?");
 	}
 
-	if (ruleisany(&r->rule.src) && ruleisany(&r->rule.dst)) {
+	if (ruleisany(&r->rule)) {
 		luaL_addstring(&b, " all");
 	} else {
 		luaL_addstring(&b, " from ");
@@ -1427,8 +2243,35 @@ pfruletostring(lua_State *L)
 		addflagspec(&b, &r->rule);
 	}
 
-	addstate(&b, &r->rule, r->anchor_call[0] != '\0');
+	if (r->rule.tos != 0) {
+		char num[24];
+
+		snprintf(num, sizeof(num), " tos 0x%2.2x", r->rule.tos);
+		luaL_addstring(&b, num);
+	}
+
+	if (r->rule.pktrate.limit != 0) {
+		char num[32];
+
+		snprintf(num, sizeof(num), " max-pkt-rate %u/%u",
+		    r->rule.pktrate.limit, r->rule.pktrate.seconds);
+		luaL_addstring(&b, num);
+	}
+
 	addsetopts(&b, &r->rule);
+	addstatekeyword(&b, &r->rule, r->anchor_call[0] != '\0');
+	addprob(&b, &r->rule);
+
+	if (r->rule.keep_state != 0 && hasstateopts(&r->rule))
+		addstateopts(&b, &r->rule);
+
+	if (r->rule.rule_flag & PFRULE_FRAGMENT)
+		luaL_addstring(&b, " fragment");
+
+	addscrubopts(&b, &r->rule);
+
+	if (r->rule.allow_opts)
+		luaL_addstring(&b, " allow-opts");
 
 	if (r->rule.label[0] != '\0') {
 		luaL_addstring(&b, " label \"");
@@ -1436,6 +2279,29 @@ pfruletostring(lua_State *L)
 		luaL_addchar(&b, '"');
 	}
 
+	if (r->rule.rule_flag & PFRULE_ONCE)
+		luaL_addstring(&b, " once");
+
+	if (r->rule.tagname[0] != '\0') {
+		luaL_addstring(&b, " tag ");
+		addbounded(&b, r->rule.tagname, sizeof(r->rule.tagname));
+	}
+
+	if (r->rule.match_tagname[0] != '\0') {
+		luaL_addstring(&b, r->rule.match_tag_not ? " ! tagged " :
+		                                           " tagged ");
+		addbounded(&b, r->rule.match_tagname,
+		    sizeof(r->rule.match_tagname));
+	}
+
+	if (r->rule.rtableid >= 0) {
+		char num[32];
+
+		snprintf(num, sizeof(num), " rtable %d", r->rule.rtableid);
+		luaL_addstring(&b, num);
+	}
+
+	adddivert(L, &b, &r->rule);
 	addtranslation(L, &b, &r->rule);
 
 	luaL_pushresult(&b);
@@ -1536,13 +2402,25 @@ keep_state, interface, interface_not, label, tag, anchor, anchor_call,
 source, destination, evaluations, packets_in, packets_out, bytes_in,
 bytes_out, states_cur, states_total, user, group, flags, redirect,
 redirect_address, redirect_port, redirect_port_end, pool_type,
-sticky_address and static_port. Source and destination render the
-way pfctl prints them, tables as &lt;name&gt; and interfaces as (name).
-interface_not says the rule matches every interface except the one named.
+sticky_address, static_port, rdomain, rtable, return_policy, return_ttl,
+return_icmp, return_icmp6, fragment, no_sync, source_track, if_bound,
+sloppy, pflow, once, expired, af_to, delay, probability, allow_opts,
+min_ttl, max_mss, tos, set_tos, no_df, random_id, reassemble_tcp,
+match_tag, match_tag_not, os_fingerprint, anchor_relative,
+anchor_wildcard, divert, divert_address, divert_port, source_addresses,
+destination_addresses, src_nodes, max_pkt_rate, max_pkt_rate_seconds,
+pkt_rate_count, pkt_rate_last, created_uid, created_pid and expires.
 
-user and group render a comparison such as "= 55" or "1000 &gt;&lt; 2000",
-or are nil when the rule constrains neither. flags renders the TCP flag
-pair as "S/SA", or is nil.
+Source and destination render the way pfctl prints them, tables as
+&lt;name&gt; and interfaces as (name). interface_not says the rule matches
+every interface except the one named, and match_tag_not says the same of
+match_tag. anchor is not kernel data: DIOCGETRULE never writes it, so a
+rule only ever reports the anchor its ruleset was read from.
+
+keep_state is "normal", "modulate", "synproxy", or nil on a rule that
+keeps no state. user and group render a comparison such as "= 55" or
+"1000 &gt;&lt; 2000", or are nil when the rule constrains neither. flags
+renders the TCP flag pair as "S/SA", or is nil.
 
 The redirect properties describe one pool. A rule may carry a nat, an rdr
 and a routing pool at once; the properties report the first of those, which
@@ -1555,5 +2433,25 @@ pool translates to a single port. pool_type is one of "bitmask", "random",
 "round-robin" or "least-states", and sticky_address and static_port the
 two pool options. Every one of them is nil, or false, on a rule that
 translates nothing.
+
+rdomain is the routing domain the rule is confined to, rtable the routing
+table it looks packets up in, and both are nil when the rule names neither.
+return_policy is "drop", "return", "return-rst" or "return-icmp" on a block
+rule and nil on any other; return_ttl, return_icmp and return_icmp6 carry
+the answer that policy sends, and are nil when it sends none.
+
+probability is a percentage. tos, set_tos, min_ttl, max_mss and delay are
+nil when the rule sets none of them. divert is "divert-to", "divert-reply"
+or "divert-packet", with divert_address and divert_port beside it.
+os_fingerprint is the packed identifier, not a name.
+
+source_addresses and destination_addresses say how many addresses a
+dynamic interface or a table resolves to right now, the counts pfctl shows
+under -vv; a table pf has not resolved reports -1, and an ordinary address
+reports nil. src_nodes is the number of source nodes the rule holds.
+max_pkt_rate and max_pkt_rate_seconds are the limit the rule was given,
+pkt_rate_count and pkt_rate_last how close it stands to it. created_uid
+and created_pid name whoever loaded the rule, and expires is when a "once"
+rule went away.
 @table rule
 */
