@@ -169,8 +169,8 @@ source limiter "scan" id 7 entries 10000 limit 1000 rate 100/10 \
 	inet mask 24 inet6 mask 64 \
 	table <flooders> above 900 below 100
 
-pass in on lo0 state limiter "dns"
-pass out on lo0 source limiter "scan"
+pass in on lo0 label "inbound" state limiter "dns"
+pass out on lo0 label "outbound" source limiter "scan"
 ]])
 f:close()
 local loaded = sh("pfctl -f /tmp/pf_test_limiters.conf")
@@ -241,6 +241,67 @@ local before = byname(statelimiters()).dns.admitted
 sh("ping -c 2 -w 2 127.0.0.1")
 local after = byname(statelimiters()).dns.admitted
 assert(after >= before, "dns admitted went backwards")
+
+-- The addresses a source limiter is tracking. "scan" masks IPv4 to /24,
+-- so lo0 traffic lands on one entry however many addresses it came from.
+local function sources(id)
+	local list = h:sources(id)
+	assert(type(list) == "table")
+	for i, e in ipairs(list) do
+		local what = "source " .. i .. " of limiter " .. id
+		assert(type(e.address) == "string" and #e.address > 0,
+		    what .. ": address")
+		assert(e.af == "inet" or e.af == "inet6", what .. ": af")
+		assert(type(e.prefix) == "number", what .. ": prefix")
+		assert(e.prefix == (e.af == "inet6" and 64 or 24),
+		    what .. ": prefix is " .. e.prefix)
+		for _, k in ipairs({ "rdomain", "inuse", "limit", "admitted",
+		    "hardlimited", "ratelimited" }) do
+			assert(type(e[k]) == "number" and e[k] >= 0,
+			    what .. ": " .. k)
+		end
+		assert(e.limit == 1000, what .. ": limit is " .. e.limit)
+	end
+	return list
+end
+
+-- The ping above went out through the "scan" rule, so the limiter is
+-- tracking the address it came from.
+local tracked = sources(7)
+assert(#tracked > 0, "source limiter scan is tracking nothing")
+assert(#tracked == byname(sourcelimiters()).scan.nentries,
+    "sources() and nentries disagree")
+assert(tracked[1].address == "127.0.0.0",
+    "scan masks to /24 but tracked " .. tracked[1].address)
+
+-- A limiter with nothing tracked answers with an empty list, not an error.
+assert(#h:sources(2) == 0, "source limiter plain is tracking something")
+
+-- An id no limiter holds is empty too; one outside the range is refused.
+assert(#h:sources(255) == 0, "an unused id returned sources")
+assert(not pcall(function() return h:sources(0) end))
+assert(not pcall(function() return h:sources(256) end))
+
+do
+	local ro = assert(pf.open("r"))
+	assert(#ro:sources(7) == #tracked,
+	    "read-only handle sees a different source list")
+	ro:close()
+
+	local c = assert(pf.open("r"))
+	c:close()
+	assert(not pcall(function() return c:sources(7) end))
+end
+
+-- pfctl.lua reproduces pfctl's own -s labels output from the binding
+-- alone. That output is the two limiter tables followed by the label
+-- counters, so a diff of the two covers every field in all three.
+for _, flags in ipairs({ "", "-v" }) do
+	local mine = sh("lua54 examples/pfctl.lua " .. flags .. " -s labels")
+	local theirs = sh("pfctl " .. flags .. " -s labels")
+	assert(mine == theirs, "pfctl.lua " .. flags .. " -s labels differs:\n" ..
+	    "--- pfctl\n" .. theirs .. "--- pfctl.lua\n" .. mine)
+end
 
 -- Loading a ruleset without limiters empties both sets again, which is the
 -- empty-list path the host also takes.

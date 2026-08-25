@@ -20,14 +20,14 @@ local function usage()
 	io.stderr:write(
 	    "usage: pfctl.lua [-vv] [-a anchor] -s modifier\n" ..
 	    "modifiers: rules queue states Anchors Sources info " ..
-	    "timeouts memory Tables Interfaces all\n")
+	    "labels timeouts memory Tables Interfaces all\n")
 	os.exit(1)
 end
 
 -- pfctl lets a modifier be abbreviated, so "ru" means rules.
 local modifiers = {
 	"rules", "queue", "states", "Anchors", "Sources", "info",
-	"timeouts", "memory", "Tables", "Interfaces", "all",
+	"labels", "timeouts", "memory", "Tables", "Interfaces", "all",
 }
 
 local function resolve(arg)
@@ -294,6 +294,72 @@ function show.queue()
 			    q.drop_packets, q.drop_bytes))
 			print(string.format("  [ qlength: %3d/%3d ]",
 			    q.queue_length, q.queue_limit))
+		end
+	end
+end
+
+-- A limiter with no rate configured reports both halves as zero, which
+-- pfctl prints as the word nil rather than a pair of noughts.
+local function ratecols(rate, width)
+	local fmt = "%" .. width .. "s/%-" .. width .. "s "
+	if rate.limit == 0 then
+		return string.format(fmt, "nil", "nil")
+	end
+	return string.format("%" .. width .. "d/%-" .. width .. "d ",
+	    rate.limit, rate.seconds)
+end
+
+-- pfctl prints the two limiter tables ahead of the label counters, and
+-- it prints their headers whether or not any limiter exists.
+local function labelledlimiters()
+	print(string.format("%3s %8s/%-8s %5s/%-5s %8s %8s %8s",
+	    "ID", "USE", "LIMIT", "RATE", "SECS",
+	    "ADMIT", "HARDLIM", "RATELIM"))
+	for _, l in ipairs(h:statelimiters()) do
+		io.write(string.format("%3d %8d/%-8d ", l.id, l.inuse,
+		    l.limit))
+		io.write(ratecols(l.rate, 5))
+		print(string.format("%8d %8d %8d", l.admitted, l.hardlimited,
+		    l.ratelimited))
+	end
+
+	print(string.format("%3s %8s/%-8s %5s %5s/%-5s %8s %8s %8s %8s",
+	    "ID", "USE", "ADDRS", "LIMIT", "RATE", "SECS",
+	    "ADMIT", "ADDRLIM", "HARDLIM", "RATELIM"))
+	for _, l in ipairs(h:sourcelimiters()) do
+		io.write(string.format("%3d %8d/%-8d %5d ", l.id, l.nentries,
+		    l.entries, l.limit))
+		io.write(ratecols(l.rate, 5))
+		print(string.format("%8d %8d %8d %8d", l.admitted,
+		    l.addrlimited, l.hardlimited, l.ratelimited))
+		-- Only the source limiters list what they are tracking,
+		-- and only when asked to be verbose.
+		if opt.verbose > 0 then
+			for _, e in ipairs(h:sources(l.id)) do
+				print(string.format(
+				    "%s/%d rdomain %d inuse %d/%d " ..
+				    "admit %d hardlim %d ratelim %d",
+				    e.address, e.prefix, e.rdomain, e.inuse,
+				    e.limit, e.admitted, e.hardlimited,
+				    e.ratelimited))
+			end
+		end
+	end
+end
+
+function show.labels()
+	labelledlimiters()
+	for _, r in ipairs(h:rules(opt.anchor)) do
+		-- A rule without a label contributes nothing here, and
+		-- pfctl does not recurse into anchors for this modifier.
+		if r.label ~= "" then
+			print(string.format("%s %d %d %d %d %d %d %d %d",
+			    r.label, r.evaluations,
+			    r.packets_in + r.packets_out,
+			    r.bytes_in + r.bytes_out,
+			    r.packets_in, r.bytes_in,
+			    r.packets_out, r.bytes_out,
+			    r.states_total))
 		end
 	end
 end
