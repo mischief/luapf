@@ -29,6 +29,10 @@ void luapf_privsep_register(lua_State *L);
 /* anchor.c */
 int pfanchors(lua_State *L);
 
+/* limiter.c */
+int pfstatelimiters(lua_State *L);
+int pfsourcelimiters(lua_State *L);
+
 /* queue.c */
 int pfqueues(lua_State *L);
 

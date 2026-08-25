@@ -89,6 +89,7 @@ lua_dep = dependency(dep_name)
 
 lua_pf_srcs = '''
 pf.c state.c queue.c table.c rule.c anchor.c system.c privsep.c
+limiter.c
 '''.split()
 
 lua_pf = shared_library('pf',
@@ -180,6 +181,7 @@ pf_test_states.lua
 pf_test_rules.lua
 pf_test_queues.lua
 pf_test_system.lua
+pf_test_limiters.lua
 '''.split()
 
 # Suite 'pf': these open /dev/pf through doas, so they only run on a host

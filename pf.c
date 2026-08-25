@@ -436,6 +436,8 @@ static const luaL_Reg pfmethods[] = {
 
     {"interfaces",     pfinterfaces    },
     {"limits",         pflimits        },
+    {"statelimiters",  pfstatelimiters },
+    {"sourcelimiters", pfsourcelimiters},
     {"timeouts",       pftimeouts      },
 
     {"srcnodes",       pfsrcnodes      },
