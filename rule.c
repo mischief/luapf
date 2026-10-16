@@ -669,6 +669,38 @@ addstateopts(luaL_Buffer *b, const struct pf_rule *rule)
 	luaL_addchar(b, ')');
 }
 
+/* pfctl lists the log options only when one differs from plain "log". */
+static void
+addlog(luaL_Buffer *b, const struct pf_rule *rule)
+{
+	bool first = true;
+	char num[32];
+
+	luaL_addstring(b, " log");
+	if ((rule->log & ~PF_LOG) == 0 && rule->logif == 0)
+		return;
+
+	luaL_addstring(b, " (");
+	if (rule->log & PF_LOG_ALL) {
+		addcomma(b, &first);
+		luaL_addstring(b, "all");
+	}
+	if (rule->log & PF_LOG_MATCHES) {
+		addcomma(b, &first);
+		luaL_addstring(b, "matches");
+	}
+	if (rule->log & PF_LOG_USER) {
+		addcomma(b, &first);
+		luaL_addstring(b, "user");
+	}
+	if (rule->logif != 0) {
+		addcomma(b, &first);
+		snprintf(num, sizeof(num), "to pflog%u", rule->logif);
+		luaL_addstring(b, num);
+	}
+	luaL_addchar(b, ')');
+}
+
 static const char *
 limiteraction(int action)
 {
@@ -2268,7 +2300,7 @@ pfruletostring(lua_State *L)
 		luaL_addstring(&b, " out");
 
 	if (r->rule.log)
-		luaL_addstring(&b, " log");
+		addlog(&b, &r->rule);
 
 	if (r->rule.quick)
 		luaL_addstring(&b, " quick");

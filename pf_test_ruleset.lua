@@ -72,6 +72,7 @@ block all
 
 pass from <firewall>
 pass out
+pass out log (all, matches, user) on vether0 proto udp to port 9
 
 pass in on testnet inet proto icmp all icmp-type echoreq
 pass in on ! pair0 proto tcp from any to any port 6000:6010
