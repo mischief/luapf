@@ -661,11 +661,12 @@ end
 local poolmethods = { ["round-robin"] = true, random = true,
     ["source-hash"] = true, bitmask = true, ["least-states"] = true }
 
---- A translation target with options, for `nat_to`, `rdr_to` and
--- `binat_to`.
+--- A translation target with options, for `nat_to`, `rdr_to`,
+-- `binat_to`, `route_to`, `reply_to`, `dup_to` and `af_to`.
 -- @param addr address
 -- @tab[opt] opts port (a port or a range), method (round-robin, random,
--- source-hash, bitmask, least-states), sticky (boolean)
+-- source-hash, bitmask, least-states), sticky, `static_port` (booleans;
+-- `static_port` is for `nat_to` only)
 -- @return pool
 function M.pool(addr, opts)
 	local sites = where()
@@ -686,17 +687,20 @@ function M.pool(addr, opts)
 				fail(sites, "pool: unknown method %s", tostring(v))
 			end
 			p.method = v
-		elseif k == "sticky" then
+		elseif k == "sticky" or k == "static_port" then
 			if type(v) ~= "boolean" then
-				fail(sites, "pool: sticky must be true or false")
+				fail(sites, "pool: %s must be true or false", k)
 			end
-			p.sticky = v
+			p[k] = v
 		else
 			fail(sites, "pool: unknown option '%s'", tostring(k))
 		end
 	end
 	if p.sticky and p.method == "bitmask" then
 		fail(sites, "pool: bitmask cannot be sticky")
+	end
+	if p.static_port and p.port then
+		fail(sites, "pool: static_port keeps the port, so it takes no port")
 	end
 	return p
 end
@@ -726,6 +730,9 @@ local function rpool(p)
 	end
 	if p.sticky then
 		w[#w + 1] = "sticky-address"
+	end
+	if p.static_port then
+		w[#w + 1] = "static-port"
 	end
 	return table.concat(w, " ")
 end
@@ -865,6 +872,10 @@ local ruleopts = {
 	user = FILTER,
 	queue = TRANSLATE, rtable = TRANSLATE, once = FILTER,
 	allow_opts = { pass = true }, nat_to = TRANSLATE,
+	route_to = { pass = true }, reply_to = { pass = true },
+	dup_to = { pass = true }, af_to = { pass = true },
+	divert_to = { pass = true }, divert_reply = { pass = true },
+	divert_packet = { pass = true },
 	rdr_to = TRANSLATE, binat_to = TRANSLATE,
 }
 
@@ -1127,9 +1138,106 @@ local function rule(action, opts, sites)
 				fail(sites, "%s: %s needs dir = \"%s\"", action, k, xdir[k])
 			end
 			local p = pool(opts[k], sites, action .. ": " .. k)
+			if p.static_port and k ~= "nat_to" then
+				fail(sites, "%s: static_port is for nat_to only", action)
+			end
 			walkaddr(p.addr, seen)
 			w[#w + 1] = k:gsub("_", "-") .. " " .. rpool(p)
 		end
+	end
+	local routes = 0
+	for _, k in ipairs({ "route_to", "reply_to", "dup_to" }) do
+		if opts[k] ~= nil then
+			routes = routes + 1
+			if k ~= "dup_to" and opts.dir == nil then
+				fail(sites, "%s: %s needs dir", action, k)
+			end
+			if opts.state == false then
+				fail(sites, "%s: %s needs state", action, k)
+			end
+			local p = pool(opts[k], sites, action .. ": " .. k)
+			walkaddr(p.addr, function(v)
+				seen(v)
+				if v.kind == "dyn" and v.mod ~= ":peer" then
+					fail(sites, "%s: %s takes (if:peer), not (if%s)", action,
+					    k, v.mod)
+				end
+			end)
+			w[#w + 1] = k:gsub("_", "-") .. " " .. rpool(p)
+		end
+	end
+	if routes > 1 then
+		fail(sites, "%s: route_to, reply_to and dup_to are exclusive", action)
+	end
+	if opts.af_to ~= nil then
+		local a = opts.af_to
+		if type(a) ~= "table" or getmetatable(a) or
+		    not oneof(a.af, "inet", "inet6") or a.from == nil then
+			fail(sites, "%s: af_to must be { af = ..., from = ..., to = ... }",
+			    action)
+		end
+		for k in pairs(a) do
+			if not oneof(k, "af", "from", "to") then
+				fail(sites, "%s: af_to: unknown option '%s'", action, k)
+			end
+		end
+		if opts.dir ~= "in" then
+			fail(sites, "%s: af_to needs dir = \"in\"", action)
+		end
+		if opts.af == a.af or opts.nat_to or opts.rdr_to or opts.binat_to then
+			fail(sites, "%s: af_to changes the family and translates alone",
+			    action)
+		end
+		local t = "af-to " .. a.af
+		for _, k in ipairs({ "from", "to" }) do
+			if a[k] ~= nil then
+				local p = pool(a[k], sites, action .. ": af_to " .. k)
+				walkaddr(p.addr, function(v)
+					if v.kind == "table" then
+						seen(v)
+					end
+					if v.kind == "addr" and v.af ~= a.af then
+						fail(sites, "%s: af_to %s is not %s", action, k, a.af)
+					end
+				end)
+				t = t .. " " .. k .. " " .. rpool(p)
+			end
+		end
+		w[#w + 1] = t
+	end
+	local diverts = 0
+	if opts.divert_to ~= nil then
+		diverts = diverts + 1
+		local d = opts.divert_to
+		local a = type(d) == "table" and type(d.addr) == "string" and
+		    parseaddr(d.addr)
+		if not a or a.text:find("/", 1, true) or not isint(d.port, 1, 65535) then
+			fail(sites, "%s: divert_to must be { addr = host, port = n }",
+			    action)
+		end
+		if opts.dir == "out" then
+			fail(sites, "%s: divert_to takes no dir = \"out\"", action)
+		end
+		r.af[a.af] = true
+		w[#w + 1] = "divert-to " .. a.text .. " port " .. d.port
+	end
+	if opts.divert_reply ~= nil then
+		diverts = diverts + 1
+		if opts.divert_reply ~= true or opts.dir == "in" then
+			fail(sites, "%s: divert_reply is true, and not dir = \"in\"",
+			    action)
+		end
+		w[#w + 1] = "divert-reply"
+	end
+	if opts.divert_packet ~= nil then
+		diverts = diverts + 1
+		if not isint(opts.divert_packet, 1, 65535) then
+			fail(sites, "%s: divert_packet is a port", action)
+		end
+		w[#w + 1] = "divert-packet port " .. opts.divert_packet
+	end
+	if diverts > 1 then
+		fail(sites, "%s: one divert option at most", action)
 	end
 	if opts.af ~= nil then
 		for af in pairs(r.af) do
@@ -1166,7 +1274,8 @@ end
 -- Filter: `dir quick log on af proto from to port from_port flags
 -- icmp_type icmp6_type user label tagged received_on once`. log is true
 -- or { all, matches, user, to }. Pass only: `allow_opts state_limiter
--- source_limiter state`, where state is false or a table of `kind max
+-- source_limiter route_to reply_to dup_to af_to divert_to divert_reply
+-- divert_packet state`, where state is false or a table of `kind max
 -- max_src_states max_src_nodes max_src_conn max_src_conn_rate overload
 -- flush source_track if_bound floating sloppy no_sync pflow`. Pass and
 -- match: `tag prio queue rtable nat_to rdr_to binat_to`.
@@ -1599,9 +1708,11 @@ local function nativepool(ctx, v, proto, sites, what)
 		port = pf.servicenumber(port, proto or "tcp") or
 		    fail(sites, "%s: unknown service %s/%s", what, port, proto or "tcp")
 	end
-	if what == "binat_to" then
+	if what == "binat_to" or what == "route_to" then
 		a.port_lo, a.port_hi = 0, 0
-	elseif what == "nat_to" then
+	elseif p.opts.static_port then
+		a.port_lo, a.port_hi = 0, 0
+	elseif what == "nat_to" or what == "af_to from" then
 		if port == nil then
 			a.port_lo, a.port_hi = 50001, 65535
 		elseif isvalue(port, "port") then
@@ -1811,6 +1922,43 @@ local function nativerule(ctx, r, out)
 		end
 		if opts.binat_to then
 			x.direction = "out"
+		end
+		for _, k in ipairs({ "route_to", "reply_to", "dup_to" }) do
+			if opts[k] then
+				local pool, paf = nativepool(ctx, opts[k], pname, sites,
+				    "route_to")
+				if af and paf and af ~= paf then
+					fail(sites, "%s: %s address in an %s rule", action, paf, af)
+				end
+				af = af or paf
+				x.rt = k:gsub("_", "-")
+				x.route = pool
+			end
+		end
+		if opts.af_to then
+			local a = opts.af_to
+			x.af_to, x.naf = true, a.af
+			x.nat = nativepool(ctx, a.from, pname, sites, "af_to from")
+			if a.to then
+				x.rdr = nativepool(ctx, a.to, pname, sites, "af_to to")
+			end
+			af = af or (a.af == "inet" and "inet6" or "inet")
+		end
+		if opts.divert_to then
+			local d = parseaddr(opts.divert_to.addr)
+			if af and af ~= d.af then
+				fail(sites, "%s: divert_to address family mismatch", action)
+			end
+			af = af or d.af
+			x.divert = { type = "to", addr = d.text, af = d.af,
+			    port = opts.divert_to.port }
+		elseif opts.divert_reply then
+			x.divert = { type = "reply" }
+		elseif opts.divert_packet then
+			x.divert = { type = "packet", port = opts.divert_packet }
+			-- pfctl reassembles tcp for divert-packet unless reassembly is off.
+			x.scrub_tcp = not (rsopts.reassemble and
+			    rsopts.reassemble.value == false)
 		end
 		local s, saf = nativeaddr(src, sites, "from")
 		local d, daf = nativeaddr(dst, sites, "to")
@@ -2297,18 +2445,16 @@ end
 
 -- Properties pf.dsl has no option for. A rule with one cannot be read.
 local unsupported = { "group", "os_fingerprint", "probability",
-    "tos", "set_tos", "divert", "rdomain", "delay", "max_pkt_rate",
+    "tos", "set_tos", "rdomain", "delay", "max_pkt_rate",
     "min_ttl", "max_mss", "return_ttl" }
-local unsupportedflags = { "af_to", "fragment", "no_df", "random_id",
-    "reassemble_tcp", "match_tag_not", "sloppy", "no_sync" }
+local unsupportedflags = { "fragment", "no_df", "random_id",
+    "match_tag_not", "sloppy", "no_sync" }
 
 local function readpool(p, af, tables, sites, what)
 	if p.ifname then
 		fail(sites, "%s: pf.dsl has no pool bound to an interface", what)
 	end
-	if p.static_port then
-		fail(sites, "%s: pf.dsl has no static-port", what)
-	end
+
 	local addr = readaddr(p, af, tables, sites, what)
 	local o = {}
 	if p.port_lo then
@@ -2316,19 +2462,25 @@ local function readpool(p, af, tables, sites, what)
 		    value("port", { text = p.port_lo .. ":" .. p.port_hi, op = ":",
 		    a = p.port_lo, b = p.port_hi })
 	end
-	-- A table pool is round-robin unless it says otherwise.
-	if p.method and not (p.method == "round-robin" and addr.kind == "table") then
+	-- A table, or an interface with all its addresses, is round-robin
+	-- unless it says otherwise.
+	local multi = addr.kind == "table" or (addr.kind == "dyn" and
+	    addr.mod ~= ":0")
+	if p.method and not (p.method == "round-robin" and multi) then
 		o.method = p.method
 	end
 	if p.sticky then
 		o.sticky = true
+	end
+	if p.static_port then
+		o.static_port = true
 	end
 	if next(o) == nil then
 		return addr
 	end
 	return value("pool", { addr = addr, opts = o, port = o.port and
 	    (type(o.port) == "number" and tostring(o.port) or o.port.text),
-	    method = o.method, sticky = o.sticky })
+	    method = o.method, sticky = o.sticky, static_port = o.static_port })
 end
 
 -- The options of one kernel rule, with what pfctl adds by default taken
@@ -2345,8 +2497,8 @@ local function readrule(r, tables, lims, sites)
 		end
 	end
 	local spec = r.spec
-	if spec.route then
-		fail(sites, "pf.dsl has no route-to")
+	if r.reassemble_tcp and r.divert ~= "divert-packet" then
+		fail(sites, "pf.dsl has no scrub (reassemble tcp)")
 	end
 	if spec.icmp_code then
 		fail(sites, "pf.dsl has no icmp-code")
@@ -2479,6 +2631,25 @@ local function readrule(r, tables, lims, sites)
 	end
 	if spec.queue then
 		o.queue = #spec.queue == 1 and spec.queue[1] or spec.queue
+	end
+	if spec.route then
+		o[(spec.rt:gsub("-", "_"))] = readpool(spec.route, r.af, tables,
+		    sites, spec.rt)
+	end
+	if r.af_to then
+		o.af_to = { af = spec.naf,
+		    from = readpool(spec.nat, spec.naf, tables, sites, "af_to") }
+		if spec.rdr then
+			o.af_to.to = readpool(spec.rdr, spec.naf, tables, sites, "af_to")
+		end
+		spec.nat, spec.rdr = nil, nil
+	end
+	if r.divert == "divert-to" then
+		o.divert_to = { addr = r.divert_address, port = r.divert_port }
+	elseif r.divert == "divert-reply" then
+		o.divert_reply = true
+	elseif r.divert == "divert-packet" then
+		o.divert_packet = r.divert_port
 	end
 	if spec.nat and spec.rdr then
 		fail(sites, "pf.dsl cannot read a rule with two pools")

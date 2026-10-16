@@ -264,6 +264,28 @@ more:pass{ log = true, dir = "in", on = pair0, proto = "tcp", port = 8000,
     rdr_to = { "192.168.77.20", "192.168.77.21" } }
 more:pass{ log = true }
 native(more, nil, true)
+roundtrip(nil)
+
+-- Routing, af-to and divert: the same through pfctl and through load,
+-- and the same again after a trip through Lua.
+local routes = dsl.ruleset()
+routes:pass{ log = true, dir = "out", on = pair0, route_to = "10.10.0.2" }
+routes:pass{ log = true, dir = "in", on = pair0,
+    reply_to = dsl.pool({ "10.10.0.2", "10.10.0.3" }, { method = "random" }) }
+routes:pass{ log = true, dir = "out", dup_to = pair0:peer() }
+routes:pass{ log = true, dir = "in", on = pair0, af = "inet",
+    af_to = { af = "inet6", from = "2001:db8:9::1", to = "64:ff9b::/96" } }
+routes:pass{ log = true, dir = "in", on = pair0, af = "inet6",
+    af_to = { af = "inet", from = "10.10.0.1" } }
+routes:pass{ log = true, dir = "in", proto = "tcp", port = 80,
+    divert_to = { addr = "127.0.0.1", port = 8080 } }
+routes:pass{ log = true, dir = "out", proto = "tcp", divert_reply = true }
+routes:pass{ log = true, dir = "in", proto = "udp", divert_packet = 700 }
+routes:match{ log = true, dir = "out", on = pair0,
+    nat_to = dsl.pool("10.10.0.9", { static_port = true }) }
+routes:pass{ log = true }
+native(routes, nil, true)
+roundtrip(nil)
 
 -- Options: the limits and timeouts pfctl -f sets, set and defaulted alike.
 local function settings()

@@ -93,6 +93,49 @@ same(function(rs) rs:match{ dir = "out", nat_to = dsl.pool(wan:addr(),
     { method = "source-hash" }) } end,
     "match out nat-to (em0) source-hash\n")
 
+-- Routing, af-to and divert, all on pass rules.
+same(function(rs)
+	rs:pass{ dir = "out", on = wan, route_to = "192.0.2.1" }
+	rs:pass{ dir = "in", reply_to = dsl.pool({ "192.0.2.1", "192.0.2.2" },
+	    { method = "random" }) }
+	rs:pass{ dup_to = wan:peer() }
+	rs:pass{ dir = "in", af = "inet", af_to = { af = "inet6",
+	    from = "2001:db8::1", to = "64:ff9b::/96" } }
+	rs:pass{ dir = "in", proto = "tcp", port = 80,
+	    divert_to = { addr = "127.0.0.1", port = 8080 } }
+	rs:pass{ dir = "out", proto = "tcp", divert_reply = true }
+	rs:pass{ dir = "in", proto = "udp", divert_packet = 700 }
+	rs:match{ dir = "out", nat_to = dsl.pool("192.0.2.9", { static_port = true }) }
+end, "pass out on em0 route-to 192.0.2.1\n" ..
+    "pass in reply-to { 192.0.2.1, 192.0.2.2 } random\n" ..
+    "pass dup-to (em0:peer)\n" ..
+    "pass in inet af-to inet6 from 2001:db8::1 to 64:ff9b::/96\n" ..
+    "pass in proto tcp from any to any port 80 divert-to 127.0.0.1 port 8080\n" ..
+    "pass out proto tcp divert-reply\n" ..
+    "pass in proto udp divert-packet port 700\n" ..
+    "match out nat-to 192.0.2.9 static-port\n")
+refuses(function(rs) rs:pass{ route_to = "192.0.2.1" } end, "route_to needs dir")
+refuses(function(rs) rs:pass{ dir = "out", route_to = "192.0.2.1", state = false }
+    end, "route_to needs state")
+refuses(function(rs) rs:pass{ dir = "out", route_to = wan:addr() } end,
+    "takes %(if:peer%)")
+refuses(function(rs) rs:match{ dir = "out", route_to = "192.0.2.1" } end,
+    "'route_to' is not allowed")
+refuses(function(rs) rs:pass{ dir = "out", route_to = "192.0.2.1",
+    dup_to = "192.0.2.2" } end, "exclusive")
+refuses(function(rs) rs:pass{ dir = "out", af_to = { af = "inet6",
+    from = "2001:db8::1" } } end, "af_to needs dir")
+refuses(function(rs) rs:pass{ dir = "in", af_to = { af = "inet6",
+    from = "192.0.2.1" } } end, "af_to from is not inet6")
+refuses(function(rs) rs:pass{ dir = "out", divert_to = { addr = "127.0.0.1",
+    port = 1 } } end, "divert_to takes no dir")
+refuses(function(rs) rs:pass{ divert_reply = true, divert_packet = 1 } end,
+    "one divert option")
+refuses(function(rs) rs:pass{ dir = "in", rdr_to = dsl.pool("192.0.2.1",
+    { static_port = true }) } end, "static_port is for nat_to only")
+refuses(function(rs) rs:pass{ dir = "out", binat_to = "192.0.2.1" } end,
+    "binat_to takes no dir")
+
 -- Options, tables and anchors.
 same(function(rs)
 	rs:set{ skip = { "lo0", wan }, limit = { states = 1000, src_nodes = 10 },
@@ -313,6 +356,23 @@ do
 	assert(rules[1].nat.port_lo == 0 and rules[1].nat.port_hi == 0)
 	assert(rules[2].direction == "in" and rules[2].to.addr == "192.0.2.5")
 	assert(rules[2].rdr.addr == "10.0.0.5" and rules[2].nat == nil)
+end
+
+-- route-to carries its pool, af-to its family, and divert-packet the
+-- tcp reassembly pfctl turns on for it.
+do
+	local spec = loaded(function(rs)
+		rs:pass{ dir = "out", on = wan, route_to = "192.0.2.1" }
+		rs:pass{ dir = "in", af_to = { af = "inet6", from = "2001:db8::1" } }
+		rs:pass{ dir = "in", proto = "udp", divert_packet = 700 }
+	end)
+	local r = spec.rulesets[1].rules
+	assert(r[1].rt == "route-to" and r[1].route.addr == "192.0.2.1" and
+	    r[1].af == "inet")
+	assert(r[2].af_to and r[2].naf == "inet6" and r[2].af == "inet" and
+	    r[2].nat.addr == "2001:db8::1" and r[2].nat.port_lo == 50001)
+	assert(r[3].divert.type == "packet" and r[3].divert.port == 700 and
+	    r[3].scrub_tcp)
 end
 
 -- A pool list becomes a const table in the loaded ruleset.
