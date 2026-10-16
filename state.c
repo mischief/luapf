@@ -84,12 +84,20 @@ state_ifname(lua_State *L, int idx)
 	return 1;
 }
 
+/*
+ * The name from /etc/protocols, or the number as a string when there is
+ * no name, as __tostring writes it.
+ */
 static int
 state_proto(lua_State *L, int idx)
 {
 	struct pfsync_state *s = luaL_checkudata(L, idx, PFSTATE_MT);
+	const char *name = cacheprotoent(s->proto);
 
-	lua_pushstring(L, cacheprotoent(s->proto));
+	if (name != NULL)
+		lua_pushstring(L, name);
+	else
+		lua_pushfstring(L, "%d", (int)s->proto);
 
 	return 1;
 }
@@ -1204,9 +1212,28 @@ pfclearstates(lua_State *L)
 	return 1;
 }
 
+/*
+ * Reads every protocol name at load time. A process that loads the module
+ * and then chroots still has the names; getprotobynumber() there finds no
+ * /etc/protocols.
+ */
+static void
+fillprotocache(void)
+{
+	struct protoent *p;
+
+	setprotoent(1);
+	while ((p = getprotoent()) != NULL)
+		if (p->p_proto >= 0 && p->p_proto < maxprotos)
+			(void)cacheprotoent((uint8_t)p->p_proto);
+	endprotoent();
+}
+
 void
 luapf_states_register(lua_State *L)
 {
+	fillprotocache();
+
 	luaL_newmetatable(L, PFSTATES_MT);
 	luaL_setfuncs(L, pfstatesmeta, 0);
 	lua_pop(L, 1);
