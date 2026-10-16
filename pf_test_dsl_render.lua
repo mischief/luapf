@@ -147,6 +147,33 @@ refuses(function(rs)
 	rs:pass{ state_limiter = dsl.statelimiter("b", { id = 4, limit = 1 }) }
 end, "defined twice", 2)
 
+-- tolua writes source that builds the same ruleset again.
+do
+	local rs = dsl.ruleset()
+	rs:set{ skip = { "lo0", wan }, block_policy = "return",
+	    limit = { states = 1000 } }
+	rs:table(dsl.table("spare", { persist = true, file = "/etc/spare" }))
+	rs:match{ dir = "out", on = wan, af = "inet",
+	    from = dsl.NOT(lan:network()), nat_to = wan:addr0(), prio = { 3, 6 } }
+	rs:block{ policy = "drop", quick = true, from = { hosts, "192.0.2.0/24" } }
+	rs:pass{ dir = "in", on = dsl.group("egress"), proto = "tcp",
+	    from_port = dsl.range(1024, 65535),
+	    port = { 22, dsl.port("!=", 23), dsl.port("><", 1, 9) },
+	    rdr_to = dsl.pool(hosts, { port = 8080, method = "random" }),
+	    state = { max_src_conn_rate = { 1, 60 }, overload = flooders,
+	    flush = "global" }, state_limiter = dns,
+	    source_limiter = { scan, action = "no-match" } }
+	local sub = dsl.ruleset()
+	sub:pass{ log = { all = true }, proto = "udp", port = 53 }
+	rs:anchor("inline", { dir = "in", rules = sub })
+	rs:anchor("ward/*")
+	local src = rs:tolua()
+	local again = assert(load(src, "=tolua"))()
+	assert(again:render() == rs:render(), "tolua changed the ruleset:\n" ..
+	    src .. "\n" .. again:render() .. "\n" .. rs:render())
+	assert(again:tolua() == src, "tolua is not stable")
+end
+
 -- Mistakes, each reported at the line that made it.
 refuses(function(rs) rs:pass{ prot = "tcp" } end, "unknown option 'prot'")
 refuses(function(rs) rs:block{ rdr_to = "192.0.2.1" } end,

@@ -1,6 +1,7 @@
 #!/usr/bin/env lua54
 -- A small router ruleset written with pf.dsl. It prints the pf.conf text.
 -- With -n it also checks the text with pfctl -n, and with -f it loads it.
+-- With -l it prints the ruleset as Lua source instead.
 
 local dsl = require("pf.dsl")
 
@@ -36,6 +37,11 @@ end
 forward(2223, www)
 
 rs:anchor("ward/*")
+
+if arg[1] == "-l" then
+	io.write(rs:tolua())
+	os.exit(0)
+end
 
 io.write(rs:render())
 

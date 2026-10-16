@@ -259,7 +259,7 @@ local function dyn(self, mod, what)
 	if getmetatable(self) ~= Iface then
 		fail(where(), "%s: call it as iface:%s()", what, what)
 	end
-	return value("dyn", { name = self.name, mod = mod })
+	return value("dyn", { name = self.name, mod = mod, group = self.group })
 end
 
 --- All addresses of the interface, as (name).
@@ -395,8 +395,12 @@ local function limiter(kind, name, opts, known, sites)
 	if not isint(opts.limit, 1, 1 << 24) then
 		fail(sites, "%s: limit must be 1 to %d", what, 1 << 24)
 	end
+	local copy = {}
+	for k, v in pairs(opts) do
+		copy[k] = v
+	end
 	return value("limiter", { which = kind, name = name, id = opts.id,
-	    sites = sites })
+	    opts = copy, sites = sites })
 end
 
 --- A state limiter: it caps the states the rules that name it create.
@@ -573,7 +577,7 @@ function M.range(lo, hi)
 	if not isint(lo, 0, 65535) or not isint(hi, 0, 65535) or lo > hi then
 		fail(sites, "range: need two ports, low first")
 	end
-	return value("port", { text = lo .. ":" .. hi })
+	return value("port", { text = lo .. ":" .. hi, op = ":", a = lo, b = hi })
 end
 
 --- A port with an operator: port("!=", 22), port("<", 1024),
@@ -589,9 +593,10 @@ function M.port(op, a, b)
 		fail(sites, "port: bad port for %s", op)
 	end
 	if two then
-		return value("port", { text = a .. " " .. op .. " " .. b })
+		return value("port", { text = a .. " " .. op .. " " .. b, op = op,
+		    a = a, b = b })
 	end
-	return value("port", { text = op .. " " .. a })
+	return value("port", { text = op .. " " .. a, op = op, a = a })
 end
 
 local function port(v, sites, what)
@@ -624,8 +629,12 @@ local poolmethods = { ["round-robin"] = true, random = true,
 -- sticky (boolean).
 function M.pool(addr, opts)
 	local sites = where()
-	local p = value("pool", { addr = address(addr, sites, "pool") })
+	local p = value("pool", { addr = address(addr, sites, "pool"),
+	    opts = {} })
 	opts = opts or {}
+	for k, v in pairs(opts) do
+		p.opts[k] = v
+	end
 	for k, v in pairs(opts) do
 		if k == "port" then
 			if not (portnum(v) or isvalue(v, "port")) then
@@ -654,7 +663,7 @@ end
 
 local function pool(v, sites, what)
 	if not isvalue(v, "pool") then
-		v = value("pool", { addr = address(v, sites, what) })
+		v = value("pool", { addr = address(v, sites, what), opts = {} })
 	end
 	if v.addr.kind == "any" or v.addr.kind == "not" or
 	    v.addr.kind == "self" then
@@ -832,7 +841,7 @@ end
 -- Check rule options and return the rule as pf.conf words.
 local function rule(action, opts, sites)
 	local r = { action = action, sites = sites, tables = {}, af = {},
-	    limiters = {} }
+	    limiters = {}, opts = opts }
 	if type(opts) ~= "table" or getmetatable(opts) ~= nil then
 		fail(sites, "%s: takes a table of options", action)
 	end
@@ -1150,6 +1159,7 @@ function Ruleset:anchor(name, opts)
 	end
 	local r = rule("anchor", copy, sites)
 	r.text = r.text:gsub("^anchor", 'anchor "' .. name .. '"')
+	r.name = name
 	r.inline = inline
 	self.items[#self.items + 1] = r
 	return self
@@ -1259,7 +1269,8 @@ function Ruleset:set(opts)
 			fail(sites, "set: %s is already set at %s", k,
 			    sitestr(self.options[k].sites))
 		end
-		self.options[k] = { line = setline(k, v, sites), sites = sites }
+		self.options[k] = { line = setline(k, v, sites), sites = sites,
+		    value = v }
 	end
 	return self
 end
@@ -1439,6 +1450,544 @@ function Ruleset:load(opts)
 		return nil, out
 	end
 	return true, out
+end
+
+--
+-- Lua out
+--
+
+local methods = { [""] = "addr", [":0"] = "addr0", [":network"] = "network",
+    [":broadcast"] = "broadcast", [":peer"] = "peer" }
+
+local function key(k)
+	if type(k) == "string" and k:match("^[%a_][%w_]*$") then
+		return k
+	end
+	return "[" .. string.format("%q", k) .. "]"
+end
+
+-- Lua source for a value. ctx maps tables and limiters to the names
+-- that hold them.
+local function ser(v, ctx)
+	local t = type(v)
+	if t == "string" then
+		return string.format("%q", v)
+	elseif t == "number" or t == "boolean" then
+		return tostring(v)
+	elseif getmetatable(v) == Iface then
+		return (v.group and "dsl.group(" or "dsl.iface(") ..
+		    ser(v.name) .. ")"
+	elseif getmetatable(v) == Ruleset then
+		return assert(ctx[v], "no name for an inline ruleset")
+	elseif isvalue(v) then
+		local k = v.kind
+		if k == "addr" then
+			return ser(v.text)
+		elseif k == "dyn" then
+			return (v.group and "dsl.group(" or "dsl.iface(") ..
+			    ser(v.name) .. "):" .. methods[v.mod] .. "()"
+		elseif k == "table" or k == "limiter" then
+			return assert(ctx[v], "no name for " .. k .. " " .. v.name)
+		elseif k == "any" or k == "self" then
+			return "dsl." .. k
+		elseif k == "not" then
+			return "dsl.NOT(" .. ser(v.inner, ctx) .. ")"
+		elseif k == "list" then
+			return ser(v.items, ctx)
+		elseif k == "port" then
+			if v.op == ":" then
+				return "dsl.range(" .. v.a .. ", " .. v.b .. ")"
+			end
+			return "dsl.port(" .. ser(v.op) .. ", " .. v.a ..
+			    (v.b and ", " .. v.b or "") .. ")"
+		elseif k == "pool" then
+			if next(v.opts) == nil then
+				return "dsl.pool(" .. ser(v.addr, ctx) .. ")"
+			end
+			return "dsl.pool(" .. ser(v.addr, ctx) .. ", " ..
+			    ser(v.opts, ctx) .. ")"
+		end
+	elseif t == "table" then
+		local parts = {}
+		for i = 1, #v do
+			parts[#parts + 1] = ser(v[i], ctx)
+		end
+		local keys = {}
+		for k in pairs(v) do
+			if not (math.type(k) == "integer" and k >= 1 and k <= #v) then
+				keys[#keys + 1] = k
+			end
+		end
+		table.sort(keys, function(a, b) return tostring(a) < tostring(b) end)
+		for _, k in ipairs(keys) do
+			parts[#parts + 1] = key(k) .. " = " .. ser(v[k], ctx)
+		end
+		if #parts == 0 then
+			return "{}"
+		end
+		return "{ " .. table.concat(parts, ", ") .. " }"
+	end
+	error("cannot write " .. tostring(v) .. " as Lua")
+end
+
+local function tableopts_of(t)
+	local o = {}
+	for _, k in ipairs({ "persist", "const", "counters" }) do
+		if t[k] then
+			o[k] = true
+		end
+	end
+	if #t.files > 0 then
+		o.file = #t.files == 1 and t.files[1] or t.files
+	end
+	if #t.addrs > 0 then
+		o.addrs = {}
+		for i, a in ipairs(t.addrs) do
+			o.addrs[i] = a:sub(1, 1) == "!" and
+			    value("not", { inner = value("addr", { text = a:sub(2) }) }) or a
+		end
+	end
+	return o
+end
+
+--- The ruleset as Lua source. Running the source returns an equal
+-- ruleset.
+function Ruleset:tolua()
+	local out = { 'local dsl = require("pf.dsl")', "local T, L = {}, {}" }
+	local ctx = {}
+	local lims = {}
+	limiters(self, lims, {})
+	local tables = {}
+	collect(self, tables, {}, lims)
+	for _, t in ipairs(tables) do
+		ctx[t] = "T[" .. ser(t.name) .. "]"
+		local o = tableopts_of(t)
+		out[#out + 1] = ctx[t] .. " = dsl.table(" .. ser(t.name) ..
+		    (next(o) and ", " .. ser(o, ctx) or "") .. ")"
+	end
+	for _, l in ipairs(lims) do
+		ctx[l] = "L[" .. l.id .. "]"
+		out[#out + 1] = ctx[l] .. " = dsl." .. l.which .. "limiter(" ..
+		    ser(l.name) .. ", " .. ser(l.opts, ctx) .. ")"
+	end
+	-- Equal tables under other names resolve to the one written out.
+	local byname = {}
+	for _, t in ipairs(tables) do
+		byname[t.name] = ctx[t]
+	end
+	setmetatable(ctx, { __index = function(_, v)
+		if isvalue(v, "table") then
+			return byname[v.name]
+		end
+	end })
+
+	local n = 0
+	local function body(rs, var)
+		out[#out + 1] = "local " .. var .. " = dsl.ruleset()"
+		local keys = {}
+		for k in pairs(rs.options) do
+			keys[#keys + 1] = k
+		end
+		table.sort(keys)
+		if #keys > 0 then
+			local o = {}
+			for _, k in ipairs(keys) do
+				o[k] = rs.options[k].value
+			end
+			out[#out + 1] = var .. ":set" .. ser(o, ctx)
+		end
+		for _, t in ipairs(rs.declared) do
+			out[#out + 1] = var .. ":table(" .. ctx[t] .. ")"
+		end
+		for _, l in ipairs(rs.limiters) do
+			out[#out + 1] = var .. ":limiter(" .. ctx[l] .. ")"
+		end
+		for _, r in ipairs(rs.items) do
+			if r.action == "anchor" then
+				local o = {}
+				for k, v in pairs(r.opts) do
+					o[k] = v
+				end
+				if r.inline then
+					n = n + 1
+					local sub = "a" .. n
+					body(r.inline, sub)
+					ctx[r.inline] = sub
+					o.rules = r.inline
+				end
+				local args = ser(r.name)
+				if next(o) then
+					args = args .. ", " .. ser(o, ctx)
+				end
+				out[#out + 1] = var .. ":anchor(" .. args .. ")"
+			else
+				out[#out + 1] = var .. ":" .. r.action .. ser(r.opts, ctx)
+			end
+		end
+	end
+	body(self, "rs")
+	out[#out + 1] = "return rs"
+	return table.concat(out, "\n") .. "\n"
+end
+
+--
+-- Lua in from the kernel
+--
+
+local dynmod = function(a)
+	local mods = {}
+	if a.network then mods[#mods + 1] = ":network" end
+	if a.broadcast then mods[#mods + 1] = ":broadcast" end
+	if a.peer then mods[#mods + 1] = ":peer" end
+	if a.first then mods[#mods + 1] = ":0" end
+	if #mods > 1 then
+		return nil
+	end
+	return mods[1] or ""
+end
+
+local function readaddr(a, af, tables, sites, what)
+	local v
+	if a.type == "any" then
+		v = M.any
+	elseif a.type == "addr" then
+		local max = (af == "inet6" or a.addr:find(":", 1, true)) and 128 or 32
+		local text = a.addr .. (a.bits < max and "/" .. a.bits or "")
+		local p, err = parseaddr(text)
+		if not p then
+			fail(sites, "%s: %s", what, err)
+		end
+		v = value("addr", p)
+	elseif a.type == "dyn" then
+		if a.name == "self" then
+			v = M.self
+		else
+			local mod = dynmod(a)
+			if not mod then
+				fail(sites, "%s: (%s) has more than one modifier", what, a.name)
+			end
+			v = value("dyn", { name = a.name, mod = mod })
+		end
+	elseif a.type == "table" then
+		v = tables[a.name] or M.table(a.name)
+		tables[a.name] = v
+	else
+		fail(sites, "%s: pf.dsl has no %s address", what, a.type)
+	end
+	if a.neg then
+		v = value("not", { inner = v })
+	end
+	return v
+end
+
+local function readport(p)
+	if p.op == "=" then
+		return p.lo
+	elseif p.op == ":" then
+		return value("port", { text = p.lo .. ":" .. p.hi, op = ":",
+		    a = p.lo, b = p.hi })
+	elseif p.op == "<>" or p.op == "><" then
+		return value("port", { text = p.lo .. " " .. p.op .. " " .. p.hi,
+		    op = p.op, a = p.lo, b = p.hi })
+	end
+	return value("port", { text = p.op .. " " .. p.lo, op = p.op, a = p.lo })
+end
+
+-- Properties pf.dsl has no option for. A rule with one cannot be read.
+local unsupported = { "user", "group", "os_fingerprint", "probability",
+    "tos", "set_tos", "divert", "rdomain", "delay", "max_pkt_rate",
+    "min_ttl", "max_mss", "return_ttl" }
+local unsupportedflags = { "af_to", "fragment", "no_df", "random_id",
+    "reassemble_tcp", "match_tag_not", "sloppy", "no_sync" }
+
+local function readpool(p, af, tables, sites, what)
+	if p.ifname then
+		fail(sites, "%s: pf.dsl has no pool bound to an interface", what)
+	end
+	if p.static_port then
+		fail(sites, "%s: pf.dsl has no static-port", what)
+	end
+	local addr = readaddr(p, af, tables, sites, what)
+	local o = {}
+	if p.port_lo then
+		o.port = p.port_lo == p.port_hi and p.port_lo or
+		    value("port", { text = p.port_lo .. ":" .. p.port_hi, op = ":",
+		    a = p.port_lo, b = p.port_hi })
+	end
+	-- A table pool is round-robin unless it says otherwise.
+	if p.method and not (p.method == "round-robin" and addr.kind == "table") then
+		o.method = p.method
+	end
+	if p.sticky then
+		o.sticky = true
+	end
+	if next(o) == nil then
+		return addr
+	end
+	return value("pool", { addr = addr, opts = o, port = o.port and
+	    (type(o.port) == "number" and tostring(o.port) or o.port.text),
+	    method = o.method, sticky = o.sticky })
+end
+
+-- The options of one kernel rule, with what pfctl adds by default taken
+-- back out.
+local function readrule(r, tables, lims, sites)
+	for _, k in ipairs(unsupported) do
+		if r[k] ~= nil then
+			fail(sites, "pf.dsl has no %s option", k)
+		end
+	end
+	for _, k in ipairs(unsupportedflags) do
+		if r[k] then
+			fail(sites, "pf.dsl has no %s option", k)
+		end
+	end
+	local spec = r.spec
+	if spec.route then
+		fail(sites, "pf.dsl has no route-to")
+	end
+	if spec.icmp_code then
+		fail(sites, "pf.dsl has no icmp-code")
+	end
+	local o = {}
+	o.dir = r.direction
+	if r.quick then
+		o.quick = true
+	end
+	if spec.log then
+		local l = {}
+		for _, k in ipairs({ "all", "matches", "user" }) do
+			l[k] = spec.log[k]
+		end
+		if spec.log.to then
+			l.to = M.iface("pflog" .. spec.log.to)
+		end
+		o.log = next(l) and l or true
+	end
+	if r.interface ~= "" then
+		local i = M.iface(r.interface)
+		o.on = r.interface_not and value("not", { inner = i }) or i
+	end
+	o.af = r.af
+	if r.proto then
+		o.proto = tonumber(r.proto) or r.proto
+	end
+	local function side(a, addrkey, portkey)
+		if a.type ~= "any" or a.neg then
+			o[addrkey] = readaddr(a, r.af, tables, sites, addrkey)
+		end
+		if a.port then
+			o[portkey] = readport(a.port)
+		end
+	end
+	side(spec.from, "from", "from_port")
+	side(spec.to, "to", "port")
+	local keep = spec.state.keep
+	if r.flags and not (r.action == "pass" and keep ~= 0 and
+	    r.flags == "S/SA") then
+		o.flags = r.flags
+	end
+	if spec.icmp_type then
+		local p = o.proto
+		o[(p == "ipv6-icmp" or p == "icmp6" or p == 58) and "icmp6_type" or
+		    "icmp_type"] = spec.icmp_type
+	end
+	if r.allow_opts then
+		o.allow_opts = true
+	end
+	if r.once then
+		o.once = true
+	end
+	if r.action == "pass" then
+		local st = spec.state
+		if keep == 0 then
+			o.state = false
+		else
+			local so = {}
+			so.kind = keep == 2 and "modulate" or keep == 3 and "synproxy" or nil
+			for _, k in ipairs({ "max", "max_src_states", "max_src_nodes",
+			    "max_src_conn" }) do
+				so[k] = st[k]
+			end
+			local tm = st.timeouts
+			if st.max_src_conn_rate then
+				so.max_src_conn_rate = { st.max_src_conn_rate.limit,
+				    st.max_src_conn_rate.seconds }
+				if tm["src.track"] == st.max_src_conn_rate.seconds then
+					tm["src.track"] = nil
+				end
+			end
+			if st.max and tm["adaptive.start"] == st.max * 6 // 10 and
+			    tm["adaptive.end"] == st.max * 12 // 10 then
+				tm["adaptive.start"], tm["adaptive.end"] = nil, nil
+			end
+			local k = next(tm)
+			if k then
+				fail(sites, "pf.dsl has no state timeout %s", k)
+			end
+			if st.overload then
+				so.overload = tables[st.overload] or M.table(st.overload)
+				tables[st.overload] = so.overload
+				if st.flush then
+					so.flush = st.flush
+				end
+			end
+			-- Any max-src option turns on source-track rule.
+			local tracked = st.max_src_states or st.max_src_nodes or
+			    st.max_src_conn or st.max_src_conn_rate
+			if r.source_track and not (tracked and r.source_track == "rule") then
+				so.source_track = r.source_track
+			end
+			if r.if_bound then
+				so.if_bound = true
+			end
+			if r.pflow then
+				so.pflow = true
+			end
+			if next(so) then
+				o.state = so
+			end
+		end
+	end
+	if r.label ~= "" then
+		o.label = r.label
+	end
+	if r.tag ~= "" then
+		o.tag = r.tag
+	end
+	if r.match_tag ~= "" then
+		o.tagged = r.match_tag
+	end
+	if spec.received_on then
+		local i = M.iface(spec.received_on.name)
+		o.received_on = spec.received_on.neg and
+		    value("not", { inner = i }) or i
+	end
+	o.rtable = r.rtable
+	if spec.prio then
+		o.prio = spec.prio[1] == spec.prio[2] and spec.prio[1] or spec.prio
+	end
+	if spec.queue then
+		o.queue = #spec.queue == 1 and spec.queue[1] or spec.queue
+	end
+	if spec.nat and spec.rdr then
+		fail(sites, "pf.dsl cannot read a rule with two pools")
+	end
+	if spec.nat then
+		o.nat_to = readpool(spec.nat, r.af, tables, sites, "nat_to")
+	end
+	if spec.rdr then
+		o.rdr_to = readpool(spec.rdr, r.af, tables, sites, "rdr_to")
+	end
+	for _, k in ipairs({ "state_limiter", "source_limiter" }) do
+		local l = spec[k]
+		if l then
+			local lim = lims[k:match("^%a+")][l.id]
+			if not lim then
+				fail(sites, "%s id %d does not exist", k, l.id)
+			end
+			o[k] = l.action == "no-match" and { lim, action = "no-match" } or
+			    lim
+		end
+	end
+	if r.action == "block" then
+		o.policy = r.return_policy
+	end
+	return o
+end
+
+--- Read a ruleset back from the kernel. h is a pf handle, and anchor
+-- names the ruleset (the main one when it is nil). Returns a ruleset, or
+-- nil and an error that names the first rule pf.dsl cannot express.
+-- Tables come back with their flags; only const tables keep their
+-- addresses, since the others hold data rather than configuration.
+function M.read(h, anchor)
+	local ok, rs = pcall(function()
+		local tables = {}
+		local declared = {}
+		for _, t in ipairs(h:tables(anchor or "")) do
+			if (t.anchor or "") == (anchor or "") then
+				local o = { persist = t.persist or nil, const = t.const or nil,
+				    counters = t.counters or nil }
+				if t.const then
+					o.addrs = {}
+					for _, e in ipairs(t:entries()) do
+						local a = e.address
+						o.addrs[#o.addrs + 1] = e.negated and
+						    value("not", { inner = value("addr", { text = a }) }) or a
+					end
+				end
+				tables[t.name] = M.table(t.name, o)
+				if not t.referenced then
+					declared[#declared + 1] = tables[t.name]
+				end
+			end
+		end
+		local lims = { state = {}, source = {} }
+		for _, l in ipairs(h:statelimiters()) do
+			local o = { id = l.id, limit = l.limit }
+			if l.rate.limit ~= 0 then
+				o.rate = { l.rate.limit, l.rate.seconds }
+			end
+			lims.state[l.id] = M.statelimiter(l.name, o)
+		end
+		for _, l in ipairs(h:sourcelimiters()) do
+			local o = { id = l.id, entries = l.entries, limit = l.limit }
+			if l.rate.limit ~= 0 then
+				o.rate = { l.rate.limit, l.rate.seconds }
+			end
+			if l.inet_prefix ~= 32 then
+				o.inet_mask = l.inet_prefix
+			end
+			if l.inet6_prefix ~= 128 then
+				o.inet6_mask = l.inet6_prefix
+			end
+			if l.overload then
+				local name = l.overload.table
+				tables[name] = tables[name] or M.table(name)
+				o.overload = tables[name]
+				o.above, o.below = l.overload.hwm, l.overload.lwm
+			end
+			lims.source[l.id] = M.sourcelimiter(l.name, o)
+		end
+
+		local rs = M.ruleset()
+		for _, t in ipairs(declared) do
+			rs:table(t)
+		end
+		if not anchor or anchor == "" then
+			for _, kind in ipairs({ "state", "source" }) do
+				for _, l in pairs(lims[kind]) do
+					rs:limiter(l)
+				end
+			end
+		end
+		for _, r in ipairs(h:rules(anchor)) do
+			local sites = { string.format("pf rule %s%d",
+			    anchor and anchor ~= "" and anchor .. "/" or "", r.nr) }
+			local o = readrule(r, tables, lims, sites)
+			local item
+			if r.anchor_call ~= "" then
+				for k in pairs(o) do
+					if not ruleopts[k].anchor then
+						o[k] = nil
+					end
+				end
+				item = rule("anchor", o, sites)
+				item.text = item.text:gsub("^anchor",
+				    'anchor "' .. r.anchor_call .. '"')
+				item.name = r.anchor_call
+			else
+				item = rule(r.action, o, sites)
+			end
+			rs.items[#rs.items + 1] = item
+		end
+		return rs
+	end)
+	if not ok then
+		return nil, rs
+	end
+	return rs
 end
 
 return M

@@ -154,6 +154,37 @@ assert(h:rules("services")[3].state_limiter == "dns",
     "the anchor rule lost its limiter")
 assert(#h:rules() == 16, "an anchor load changed the main ruleset")
 
+-- Lua out: a ruleset read from the kernel, written as Lua and run again,
+-- loads to the same kernel rules.
+local function texts(anchor)
+	local out = {}
+	for i, r in ipairs(h:rules(anchor)) do
+		out[i] = tostring(r)
+	end
+	return out
+end
+
+local function roundtrip(anchor)
+	local before = texts(anchor)
+	local back = assert(dsl.read(h, anchor))
+	local src = back:tolua()
+	local again = assert(load(src, "=tolua"))()
+	assert(again:render() == back:render(), "tolua changed the ruleset")
+	ok, out = again:load({ anchor = anchor })
+	assert(ok, "the read ruleset does not load:\n" .. tostring(out) ..
+	    "\n" .. again:render())
+	local after = texts(anchor)
+	assert(#after == #before, "read back " .. #after .. " rules, not " ..
+	    #before)
+	for i = 1, #before do
+		assert(before[i] == after[i], string.format(
+		    "rule %d changed on the way through Lua:\n  was: %s\n  now: %s\n%s",
+		    i, before[i], after[i], src))
+	end
+end
+roundtrip(nil)
+roundtrip("services")
+
 -- pfctl's errors come back at the Lua line that made the bad rule, and a
 -- refused ruleset leaves the loaded one in place.
 local bad = dsl.ruleset()
