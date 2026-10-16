@@ -29,7 +29,7 @@
  * This is an upper bound on its size with room for padding, which is safe:
  * the getters check the metatable, not the length.
  */
-enum { rulesize = sizeof(struct pf_rule) + 2 * PATH_MAX + 64 };
+enum { rulesize = sizeof(struct pf_rule) + 2 * PATH_MAX + 128 };
 
 static void
 run(const unsigned char *buf, size_t len)

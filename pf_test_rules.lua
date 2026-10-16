@@ -37,6 +37,8 @@ local properties = {
 	"source_addresses", "destination_addresses", "src_nodes",
 	"max_pkt_rate", "max_pkt_rate_seconds", "pkt_rate_count",
 	"pkt_rate_last", "created_uid", "created_pid", "expires",
+	"state_limiter", "state_limiter_action", "source_limiter",
+	"source_limiter_action",
 }
 
 -- Every state-keeping mode rule.c can name, and every divert and return

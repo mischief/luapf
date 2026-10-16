@@ -29,6 +29,10 @@ struct luapfrule {
 	struct pf_rule rule;
 	char anchor[PATH_MAX];
 	char anchor_call[PATH_MAX];
+	/* Limiter names, read from the kernel with the rule. Empty when the
+	 * rule names no limiter or the lookup failed. */
+	char statelim[PF_STATELIM_NAME_LEN];
+	char sourcelim[PF_SOURCELIM_NAME_LEN];
 	uint32_t nr;
 };
 
@@ -662,6 +666,37 @@ addstateopts(luaL_Buffer *b, const struct pf_rule *rule)
 		luaL_addstring(b, num);
 	}
 
+	luaL_addchar(b, ')');
+}
+
+static const char *
+limiteraction(int action)
+{
+	return action == PF_LIMITER_NOMATCH ? "no-match" : "block";
+}
+
+/* pfctl names the limiter, or gives its id when it has no name for it. */
+static void
+addlimiter(luaL_Buffer *b, const char *kind, uint8_t id, const char *name,
+           size_t namesize, int action)
+{
+	char num[64];
+
+	if (id == 0)
+		return;
+
+	luaL_addchar(b, ' ');
+	luaL_addstring(b, kind);
+	if (name[0] != '\0') {
+		luaL_addstring(b, " limiter \"");
+		addbounded(b, name, namesize);
+		luaL_addchar(b, '"');
+	} else {
+		snprintf(num, sizeof(num), " limiter id %u", id);
+		luaL_addstring(b, num);
+	}
+	luaL_addstring(b, " (");
+	luaL_addstring(b, limiteraction(action));
 	luaL_addchar(b, ')');
 }
 
@@ -1496,6 +1531,65 @@ rule_source_track(lua_State *L, int idx)
 	return 1;
 }
 
+/* A limiter by name, or by id when its name could not be read. */
+static int
+pushlimiter(lua_State *L, uint8_t id, const char *name, size_t namesize)
+{
+	if (id == 0)
+		lua_pushnil(L);
+	else if (name[0] != '\0')
+		pushbounded(L, name, namesize);
+	else
+		lua_pushinteger(L, id);
+
+	return 1;
+}
+
+static int
+rule_state_limiter(lua_State *L, int idx)
+{
+	struct luapfrule *r = luaL_checkudata(L, idx, PFRULE_MT);
+
+	return pushlimiter(L, r->rule.statelim.id, r->statelim,
+	                   sizeof(r->statelim));
+}
+
+static int
+rule_state_limiter_action(lua_State *L, int idx)
+{
+	struct luapfrule *r = luaL_checkudata(L, idx, PFRULE_MT);
+
+	if (r->rule.statelim.id == 0)
+		lua_pushnil(L);
+	else
+		lua_pushstring(L, limiteraction(r->rule.statelim.limiter_action));
+
+	return 1;
+}
+
+static int
+rule_source_limiter(lua_State *L, int idx)
+{
+	struct luapfrule *r = luaL_checkudata(L, idx, PFRULE_MT);
+
+	return pushlimiter(L, r->rule.sourcelim.id, r->sourcelim,
+	                   sizeof(r->sourcelim));
+}
+
+static int
+rule_source_limiter_action(lua_State *L, int idx)
+{
+	struct luapfrule *r = luaL_checkudata(L, idx, PFRULE_MT);
+
+	if (r->rule.sourcelim.id == 0)
+		lua_pushnil(L);
+	else
+		lua_pushstring(L,
+		               limiteraction(r->rule.sourcelim.limiter_action));
+
+	return 1;
+}
+
 static int
 rule_delay(lua_State *L, int idx)
 {
@@ -2105,6 +2199,10 @@ static const struct ro_property rule_properties[] = {
     {"created_uid",           rule_created_uid          },
     {"created_pid",           rule_created_pid          },
     {"expires",               rule_expires              },
+    {"state_limiter",         rule_state_limiter        },
+    {"state_limiter_action",  rule_state_limiter_action },
+    {"source_limiter",        rule_source_limiter       },
+    {"source_limiter_action", rule_source_limiter_action},
     {NULL,                    NULL                      },
 };
 
@@ -2264,6 +2362,10 @@ pfruletostring(lua_State *L)
 	addsetopts(&b, &r->rule);
 	addstatekeyword(&b, &r->rule, r->anchor_call[0] != '\0');
 	addprob(&b, &r->rule);
+	addlimiter(&b, "state", r->rule.statelim.id, r->statelim,
+	           sizeof(r->statelim), r->rule.statelim.limiter_action);
+	addlimiter(&b, "source", r->rule.sourcelim.id, r->sourcelim,
+	           sizeof(r->sourcelim), r->rule.sourcelim.limiter_action);
 
 	if (r->rule.keep_state != 0 && hasstateopts(&r->rule))
 		addstateopts(&b, &r->rule);
@@ -2330,6 +2432,31 @@ whole ruleset is read at once.
 @raise if the anchor does not exist
 @usage for _, r in ipairs(h:rules()) do print(tostring(r)) end
 */
+/* Fill in the names of the limiters a rule uses. A failed lookup leaves the
+ * name empty, and the rule then shows the id. */
+static void
+limitername(int fd, struct luapfrule *r)
+{
+	if (r->rule.statelim.id != 0) {
+		struct pfioc_statelim sl;
+
+		memset(&sl, 0, sizeof(sl));
+		sl.id = r->rule.statelim.id;
+		if (ioctl(fd, DIOCGETSTATELIM, &sl) == 0)
+			copybounded(r->statelim, sizeof(r->statelim), sl.name,
+			            sizeof(sl.name));
+	}
+	if (r->rule.sourcelim.id != 0) {
+		struct pfioc_sourcelim sl;
+
+		memset(&sl, 0, sizeof(sl));
+		sl.id = r->rule.sourcelim.id;
+		if (ioctl(fd, DIOCGETSOURCELIM, &sl) == 0)
+			copybounded(r->sourcelim, sizeof(r->sourcelim), sl.name,
+			            sizeof(sl.name));
+	}
+}
+
 int
 pfrules(lua_State *L)
 {
@@ -2380,6 +2507,7 @@ pfrules(lua_State *L)
 		            sizeof(pr->anchor));
 		copybounded(r->anchor_call, sizeof(r->anchor_call),
 		            pr->anchor_call, sizeof(pr->anchor_call));
+		limitername(pf->fd, r);
 
 		lua_rawseti(L, -2, n++);
 	}
@@ -2412,7 +2540,9 @@ min_ttl, max_mss, tos, set_tos, no_df, random_id, reassemble_tcp,
 match_tag, match_tag_not, os_fingerprint, anchor_relative,
 anchor_wildcard, divert, divert_address, divert_port, source_addresses,
 destination_addresses, src_nodes, max_pkt_rate, max_pkt_rate_seconds,
-pkt_rate_count, pkt_rate_last, created_uid, created_pid and expires.
+pkt_rate_count, pkt_rate_last, created_uid, created_pid, expires,
+state_limiter, state_limiter_action, source_limiter and
+source_limiter_action.
 
 Source and destination render the way pfctl prints them, tables as
 &lt;name&gt; and interfaces as (name). interface_not says the rule matches
