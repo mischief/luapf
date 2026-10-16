@@ -2,8 +2,8 @@
 --
 -- Each constructor checks its arguments when it is called. An error names
 -- the Lua file and line of the call, and of the function call around it.
--- load uses pfctl(8); commit writes to the kernel directly. read and
--- tolua turn a loaded ruleset back into Lua. See examples/dsl.lua.
+-- load writes it to the kernel the way pfctl -f does, with no program.
+-- read and tolua turn a loaded ruleset back into Lua. See examples/dsl.lua.
 -- @module pf.dsl
 
 local M = {}
@@ -1118,10 +1118,12 @@ local function rule(action, opts, sites)
 			fail(sites, "%s: queue must be a name, or two names", action)
 		end
 	end
-	local xdir = { nat_to = "out", rdr_to = "in", binat_to = "out" }
+	local xdir = { nat_to = "out", rdr_to = "in" }
 	for _, k in ipairs({ "nat_to", "rdr_to", "binat_to" }) do
 		if opts[k] ~= nil then
-			if opts.dir ~= xdir[k] then
+			if k == "binat_to" and opts.dir ~= nil then
+				fail(sites, "%s: binat_to takes no dir; it makes both", action)
+			elseif xdir[k] and opts.dir ~= xdir[k] then
 				fail(sites, "%s: %s needs dir = \"%s\"", action, k, xdir[k])
 			end
 			local p = pool(opts[k], sites, action .. ": " .. k)
@@ -1276,7 +1278,7 @@ for _, k in ipairs({ "tcp.first", "tcp.opening", "tcp.established",
     "tcp.closing", "tcp.finwait", "tcp.closed", "udp.first", "udp.single",
     "udp.multiple", "icmp.first", "icmp.error", "other.first",
     "other.single", "other.multiple", "frag", "interval", "src.track",
-    "adaptive.start", "adaptive.end" }) do
+    "adaptive.start", "adaptive.end", "tcp.tsdiff" }) do
 	timeouts[k] = true
 end
 
@@ -1484,68 +1486,8 @@ function Ruleset:render()
 	return table.concat(lines, "\n") .. "\n"
 end
 
-local function run(cmd)
-	local p = io.popen(cmd .. " 2>&1", "r")
-	if not p then
-		return false, "cannot run " .. cmd
-	end
-	local out = p:read("a")
-	local ok = p:close()
-	return ok, out
-end
-
-local function shquote(s)
-	return "'" .. s:gsub("'", "'\\''") .. "'"
-end
-
---- Check the ruleset with pfctl -n, then load it with pfctl.
--- @tab[opt] opts anchor (load into this anchor), check (check only),
--- pfctl (the command to run), run (a function(cmd) that returns ok and
--- output)
--- @treturn[1] boolean true
--- @treturn[1] string pfctl's output
--- @return[2] nil
--- @treturn[2] string error, with pf.conf lines given as Lua call sites
-function Ruleset:load(opts)
-	opts = opts or {}
-	local sites = where()
-	local runner = opts.run or run
-	local cmd = opts.pfctl or "pfctl"
-	if opts.anchor ~= nil then
-		cmd = cmd .. " -a " .. shquote(anchorname(opts.anchor, sites))
-	end
-	local lines, map = self:lines(opts.anchor ~= nil)
-	local path = os.tmpname()
-	local f, err = io.open(path, "w")
-	if not f then
-		os.remove(path)
-		return nil, err
-	end
-	f:write(table.concat(lines, "\n"), "\n")
-	f:close()
-
-	local function step(flags)
-		local ok, out = runner(cmd .. flags .. " -f " .. shquote(path))
-		local escaped = path:gsub("%p", "%%%0")
-		out = out:gsub(escaped .. ":(%d+):", function(n)
-			n = tonumber(n)
-			return sitestr(map[n]) .. ": " .. (lines[n] or "") .. ":"
-		end)
-		return ok, out
-	end
-	local ok, out = step(" -n")
-	if ok and not opts.check then
-		ok, out = step("")
-	end
-	os.remove(path)
-	if not ok then
-		return nil, out
-	end
-	return true, out
-end
-
 --
--- Native load: the ruleset straight into the kernel, without pfctl
+-- Loading: the ruleset into the kernel, expanded the way pfctl does
 --
 
 local tcpflags = { F = 0x01, S = 0x02, R = 0x04, P = 0x08, A = 0x10,
@@ -1588,7 +1530,7 @@ local function nativeaddr(v, sites, what)
 	elseif v.kind == "table" then
 		a = { type = "table", name = v.name }
 	else
-		fail(sites, "%s: commit cannot load %s", what, v.kind)
+		fail(sites, "%s: cannot load %s", what, v.kind)
 	end
 	a.neg = neg
 	return a, v.af
@@ -1617,18 +1559,49 @@ local function nativeports(v, proto, sites, what, pf)
 	return out
 end
 
-local function nativepool(v, proto, sites, what, pf)
-	local p = isvalue(v, "pool") and v or value("pool", { addr = v, opts = {} })
-	if p.addr.kind == "list" then
-		fail(sites, "%s: commit cannot load a pool list; use a table", what)
+-- A pool given as a list becomes a const table, the way pfctl does it.
+local function autotable(ctx, list, sites, what)
+	local addrs = {}
+	for _, v in ipairs(list.items) do
+		if v.kind ~= "addr" then
+			fail(sites, "%s: a pool list holds addresses only", what)
+		end
+		addrs[#addrs + 1] = v.text
 	end
-	local a, paf = nativeaddr(p.addr, sites, what)
+	ctx.ntables = ctx.ntables + 1
+	local t = value("table", { name = string.format("__automatic_%x_%d",
+	    ctx.tableid, ctx.ntables - 1), const = true, persist = false,
+	    counters = false, files = {}, addrs = addrs, sites = sites })
+	ctx.autotables[#ctx.autotables + 1] = t
+	return t
+end
+
+local function nativepool(ctx, v, proto, sites, what)
+	local pf = ctx.pf
+	local p = isvalue(v, "pool") and v or
+	    value("pool", { addr = address(v, sites, what), opts = {} })
+	local addr = p.addr
+	if addr.kind == "list" then
+		addr = autotable(ctx, addr, sites, what)
+	end
+	local a, paf = nativeaddr(addr, sites, what)
+	if addr ~= p.addr then
+		-- A list decides the family only when all of it shares one.
+		paf = p.addr.items[1].af
+		for _, v in ipairs(p.addr.items) do
+			if v.af ~= paf then
+				paf = nil
+			end
+		end
+	end
 	local port = p.opts.port
 	if type(port) == "string" then
 		port = pf.servicenumber(port, proto or "tcp") or
 		    fail(sites, "%s: unknown service %s/%s", what, port, proto or "tcp")
 	end
-	if what == "nat_to" then
+	if what == "binat_to" then
+		a.port_lo, a.port_hi = 0, 0
+	elseif what == "nat_to" then
 		if port == nil then
 			a.port_lo, a.port_hi = 50001, 65535
 		elseif isvalue(port, "port") then
@@ -1708,7 +1681,8 @@ local function nativestate(opts, rsopts, proto, out)
 end
 
 -- One dsl rule as the kernel rules pfctl would expand it to.
-local function nativerule(r, rsopts, pf, out)
+local function nativerule(ctx, r, out)
+	local rsopts, pf = ctx.rsopts, ctx.pf
 	local opts, sites, action = r.opts, r.sites, r.action
 	local anchor = action == "anchor"
 	local base = { where = sitestr(sites), action = anchor and "pass" or action,
@@ -1756,7 +1730,15 @@ local function nativerule(r, rsopts, pf, out)
 		end
 	end
 	if opts.binat_to then
-		fail(sites, "%s: commit cannot load binat-to yet; use load()", action)
+		local b = isvalue(opts.binat_to, "pool") and opts.binat_to.addr or
+		    opts.binat_to
+		for _, v in ipairs({ address(opts.from or M.any, sites, "from"),
+		    address(b, sites, "binat_to") }) do
+			if not (v.kind == "addr" or (v.kind == "dyn" and v.mod == ":0")) then
+				fail(sites, "%s: binat_to needs an address or (if:0) on " ..
+				    "both sides", action)
+			end
+		end
 	end
 
 	local ifs = { false }
@@ -1817,15 +1799,18 @@ local function nativerule(r, rsopts, pf, out)
 			x[k] = v
 		end
 		local af = af0
-		for _, k in ipairs({ "nat_to", "rdr_to" }) do
+		for _, k in ipairs({ "nat_to", "rdr_to", "binat_to" }) do
 			if opts[k] then
-				local pool, paf = nativepool(opts[k], pname, sites, k, pf)
+				local pool, paf = nativepool(ctx, opts[k], pname, sites, k)
 				if af and paf and af ~= paf then
 					fail(sites, "%s: %s address in an %s rule", action, paf, af)
 				end
 				af = af or paf
-				x[k == "nat_to" and "nat" or "rdr"] = pool
+				x[k == "rdr_to" and "rdr" or "nat"] = pool
 			end
+		end
+		if opts.binat_to then
+			x.direction = "out"
 		end
 		local s, saf = nativeaddr(src, sites, "from")
 		local d, daf = nativeaddr(dst, sites, "to")
@@ -1866,6 +1851,27 @@ local function nativerule(r, rsopts, pf, out)
 			end
 			out[#out + 1] = x
 			added = added + 1
+			-- binat-to adds the inbound rule that maps the target back.
+			if opts.binat_to then
+				local y = {}
+				for k, v in pairs(x) do
+					y[k] = v
+				end
+				y.direction, y.nat = "in", nil
+				y.from = nativeaddr(dst, sites, "to")
+				y.from.port = dp or nil
+				local b = isvalue(opts.binat_to, "pool") and
+				    opts.binat_to.addr or opts.binat_to
+				y.to = nativeaddr(address(b, sites, "binat_to"), sites,
+				    "binat_to")
+				y.to.port = sp or nil
+				y.rdr = nativeaddr(src, sites, "from")
+				y.rdr.port_lo, y.rdr.port_hi = 0, 0
+				if y.rdr.type == "dyn" and not y.rdr.first then
+					y.rdr.method = "round-robin"
+				end
+				out[#out + 1] = y
+			end
 		end
 	end end end end end end
 	if added == 0 then
@@ -1907,16 +1913,61 @@ local function tableaddrs(t, sites)
 	return (#t.addrs > 0 or #t.files > 0) and out or nil
 end
 
+-- The timeouts each set optimization stands for, as pfctl has them.
+local hints = {
+	normal = { 120, 30, 86400, 900, 45, 90, 30 },
+	satellite = { 180, 35, 86400, 905, 50, 95, 60 },
+	conservative = { 3600, 900, 432000, 3600, 600, 180, 60 },
+	aggressive = { 30, 5, 18000, 60, 30, 30, 10 },
+}
+hints["high-latency"] = hints.satellite
+local hintnames = { "tcp.first", "tcp.opening", "tcp.established",
+    "tcp.closing", "tcp.finwait", "tcp.closed", "tcp.tsdiff" }
+
+local function nativeoptions(rs)
+	local o = rs.options
+	local out = {}
+	if o.limit then
+		out.limits = {}
+		for k, v in pairs(o.limit.value) do
+			out.limits[(k:gsub("_", "-"))] = v
+		end
+	end
+	if o.optimization or o.timeout then
+		out.timeouts = {}
+		if o.optimization then
+			for i, v in ipairs(hints[o.optimization.value]) do
+				out.timeouts[hintnames[i]] = v
+			end
+		end
+		for k, v in pairs(o.timeout and o.timeout.value or {}) do
+			out.timeouts[(k:gsub("_", "."))] = v
+		end
+	end
+	if o.loginterface then
+		local v = o.loginterface.value
+		out.loginterface = getmetatable(v) == Iface and v.name or v
+	end
+	if o.reassemble then
+		out.reassemble = o.reassemble.value
+	end
+	return out
+end
+
 -- The argument h:load() takes.
 local function nativespec(rs, anchor, pf)
-	local unsupported = { "limit", "timeout", "optimization", "loginterface",
-	    "reassemble" }
-	for _, k in ipairs(unsupported) do
-		if rs.options[k] then
-			fail(rs.options[k].sites, "set: commit cannot set %s yet; use load()", k)
+	if anchor ~= "" then
+		for k, v in pairs(rs.options) do
+			if k == "skip" or k == "limit" or k == "timeout" or
+			    k == "optimization" or k == "loginterface" or
+			    k == "reassemble" then
+				fail(v.sites, "set: %s belongs to the main ruleset", k)
+			end
 		end
 	end
 	local spec = { rulesets = {} }
+	local ctx = { pf = pf, rsopts = rs.options, autotables = {},
+	    ntables = 0, tableid = math.random(0, 0x7fffffff) }
 	local lims = {}
 	if anchor == "" then
 		limiters(rs, lims, {})
@@ -1932,7 +1983,7 @@ local function nativespec(rs, anchor, pf)
 			    addrs = tableaddrs(t, t.sites) }
 		end
 		for _, item in ipairs(r.items) do
-			nativerule(item, rs.options, pf, entry.rules)
+			nativerule(ctx, item, entry.rules)
 			if item.inline then
 				ruleset(item.inline, path == "" and item.name or
 				    path .. "/" .. item.name, {})
@@ -1940,6 +1991,14 @@ local function nativespec(rs, anchor, pf)
 		end
 	end
 	ruleset(rs, anchor, tables)
+	for _, t in ipairs(ctx.autotables) do
+		local e = spec.rulesets[1].tables
+		e[#e + 1] = { name = t.name, const = true,
+		    addrs = tableaddrs(t, t.sites) }
+	end
+	if anchor == "" then
+		spec.options = nativeoptions(rs)
+	end
 	spec.statelimiters, spec.sourcelimiters = {}, {}
 	for _, l in ipairs(lims) do
 		local o = l.opts
@@ -1964,19 +2023,29 @@ local function nativespec(rs, anchor, pf)
 	return spec
 end
 
---- Load the ruleset straight into the kernel in one transaction, with no
--- pfctl. It expands and fills in rules the way pfctl does.
--- @param h a handle from pf.open
--- @tab[opt] opts anchor (load into this anchor)
+--- Load the ruleset into the kernel in one transaction, the way pfctl -f
+-- does: rules, tables, limiters, and on the main ruleset its options. It
+-- runs no program; rules are expanded and filled in here.
+-- @tab[opt] opts anchor (load into this anchor), check (send it all,
+-- then roll back), pf (a handle from pf.open; one is opened otherwise),
+-- names (the name lookups, for tests; the pf module by default)
 -- @treturn[1] boolean true
 -- @return[2] nil
 -- @treturn[2] string error that names the Lua line of the rule
-function Ruleset:commit(h, opts)
+function Ruleset:load(opts)
 	opts = opts or {}
+	local sites = where()
 	local ok, err = pcall(function()
-		local pf = require("pf")
-		local anchor = opts.anchor and anchorname(opts.anchor, where()) or ""
-		return h:load(nativespec(self, anchor, pf))
+		local names = opts.names or require("pf")
+		local anchor = opts.anchor and anchorname(opts.anchor, sites) or ""
+		local spec = nativespec(self, anchor, names)
+		spec.check = opts.check
+		local h = opts.pf or assert(require("pf").open())
+		local done = h:load(spec)
+		if not opts.pf then
+			h:close()
+		end
+		return done
 	end)
 	if not ok then
 		return nil, err

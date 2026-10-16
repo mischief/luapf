@@ -40,6 +40,20 @@ must("ifconfig vether0 192.168.77.1/24 up")
 
 local h = assert(pf.open())
 
+-- pfctl is the reference: it loads the rendered text, and pf.dsl's own
+-- load must leave the kernel the same.
+local function pfctl(rs, anchor)
+	local path = "/tmp/pf_test_dsl.conf"
+	local f = assert(io.open(path, "w"))
+	f:write(table.concat((rs:lines(anchor ~= nil)), "\n"), "\n")
+	f:close()
+	local out = sh("pfctl " .. (anchor and "-a " .. anchor .. " " or "") ..
+	    "-f " .. path)
+	os.remove(path)
+	assert(out == "", "pfctl rejected the ruleset:\n" .. out ..
+	    rs:render())
+end
+
 -- The rules of an anchor, as luapf renders them and as pfctl prints them.
 local function compare(anchor)
 	local theirs = {}
@@ -116,8 +130,8 @@ rs:pass{ dir = "in", log = true, on = pair0, proto = "udp", port = 53,
     state_limiter = dns, source_limiter = { scan, action = "no-match" } }
 rs:anchor("services", { dir = "in", on = pair0 })
 
-local ok, out = rs:load()
-assert(ok, "pf.dsl load failed:\n" .. tostring(out))
+pfctl(rs)
+local ok, out
 
 -- Each list of two doubles its rule.
 local theirs = compare()
@@ -147,8 +161,7 @@ local sub = dsl.ruleset()
 sub:pass{ log = true, proto = "tcp", port = dsl.range(6000, 6010) }
 sub:block{ log = true, proto = "udp", from_port = dsl.port("<", 1024) }
 sub:pass{ log = true, proto = "udp", port = 5353, state_limiter = dns }
-ok, out = sub:load({ anchor = "services" })
-assert(ok, "anchor load failed:\n" .. tostring(out))
+pfctl(sub, "services")
 assert(#compare("services") == 3, "the anchor does not hold three rules")
 assert(h:rules("services")[3].state_limiter == "dns",
     "the anchor rule lost its limiter")
@@ -185,7 +198,6 @@ end
 roundtrip(nil)
 roundtrip("services")
 
--- Without pfctl: commit writes the same kernel rules that load does.
 -- Tables and limiters, as text that two loads can be compared by.
 local function others(anchor)
 	local out = {}
@@ -213,22 +225,31 @@ local function others(anchor)
 	return table.concat(out, "\n")
 end
 
-local function native(rs, anchor)
+-- An automatic table gets a random name each load.
+local function plain(s)
+	return (s:gsub("__automatic_%x+_%d+", "__automatic"))
+end
+
+-- load leaves the kernel as pfctl left it: rules, tables and limiters.
+local function native(rs, anchor, viapfctl)
+	if viapfctl then
+		pfctl(rs, anchor)
+	end
 	local before = texts(anchor)
-	local beforeothers = others(anchor)
-	ok, out = rs:commit(h, { anchor = anchor })
-	assert(ok, "commit failed:\n" .. tostring(out))
+	local beforeothers = plain(others(anchor))
+	ok, out = rs:load({ anchor = anchor, pf = h })
+	assert(ok, "load failed:\n" .. tostring(out))
 	local after = texts(anchor)
 	local wrong = {}
 	for i = 1, math.max(#before, #after) do
-		if before[i] ~= after[i] then
-			wrong[#wrong + 1] = string.format("[%d]\n  pfctl:  %s\n  commit: %s",
+		if plain(before[i] or "") ~= plain(after[i] or "") then
+			wrong[#wrong + 1] = string.format("[%d]\n  pfctl: %s\n  load:  %s",
 			    i, tostring(before[i]), tostring(after[i]))
 		end
 	end
-	assert(#wrong == 0, "commit differs from pfctl:\n" ..
+	assert(#wrong == 0, "load differs from pfctl:\n" ..
 	    table.concat(wrong, "\n"))
-	local afterothers = others(anchor)
+	local afterothers = plain(others(anchor))
 	assert(afterothers == beforeothers, "tables or limiters differ:\n" ..
 	    beforeothers .. "\n---\n" .. afterothers)
 end
@@ -236,26 +257,47 @@ native(rs, nil)
 native(sub, "services")
 native(assert(dsl.read(h)), nil)
 
--- pfctl's errors come back at the Lua line that made the bad rule, and a
--- refused ruleset leaves the loaded one in place.
+-- binat-to makes two rules, and a pool list makes a table.
+local more = dsl.ruleset()
+more:pass{ log = true, on = pair0, from = "10.10.0.5", binat_to = "192.168.77.5" }
+more:pass{ log = true, dir = "in", on = pair0, proto = "tcp", port = 8000,
+    rdr_to = { "192.168.77.20", "192.168.77.21" } }
+more:pass{ log = true }
+native(more, nil, true)
+
+-- Options: the limits and timeouts pfctl -f sets, set and defaulted alike.
+local function settings()
+	return sh("pfctl -s timeouts") .. sh("pfctl -s memory") ..
+	    sh("pfctl -s info | grep -i 'interface stats'")
+end
+local opts = dsl.ruleset()
+opts:set{ limit = { states = 20000, src_nodes = 5000 },
+    optimization = "aggressive", timeout = { tcp_first = 77, udp_single = 9 },
+    loginterface = pair0, reassemble = true }
+opts:pass{ log = true }
+pfctl(opts)
+local want = settings()
+pfctl((function() local r = dsl.ruleset() r:pass{ log = true } return r end)())
+assert(settings() ~= want, "a plain ruleset left the options set")
+ok, out = opts:load({ pf = h })
+assert(ok, out)
+local got = settings()
+assert(got == want, "options differ:\n" .. want .. "---\n" .. got)
+
+native(rs, nil, true)
+
+-- A refused rule is named by its Lua line, and the loaded ruleset stays.
 local bad = dsl.ruleset()
 bad:pass{ log = true }
 bad:pass{ log = true, queue = "nosuchqueue" }
 local badline = debug.getinfo(1, "l").currentline - 1
 ok, out = bad:load()
-assert(not ok, "pfctl took a rule naming a queue that does not exist")
-assert(out:find("pf_test_dsl.lua:" .. badline .. ":", 1, true),
-    "pfctl's error does not name the Lua line:\n" .. out)
-assert(#h:rules() == 16, "a refused load changed the ruleset")
-
--- commit reports a refused rule at its Lua line and rolls back.
-ok, out = bad:commit(h)
 assert(not ok, "the kernel took a rule naming a queue that does not exist")
 assert(out:find("pf_test_dsl.lua:" .. badline .. ":", 1, true),
-    "commit's error does not name the Lua line:\n" .. out)
-assert(#h:rules() == 16, "a refused commit changed the ruleset")
+    "load's error does not name the Lua line:\n" .. out)
+assert(#h:rules() == 16, "a refused load changed the ruleset")
 
--- check only runs pfctl -n.
+-- check sends everything and keeps none of it.
 ok, out = bad:load({ check = true })
 assert(not ok)
 ok, out = sub:load({ check = true })

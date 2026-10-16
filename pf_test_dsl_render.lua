@@ -245,38 +245,122 @@ do
 	    "pf_test_dsl_render.lua:" .. from), err)
 end
 
--- pfctl's line numbers come back as the Lua lines that made them.
-do
+-- load builds what h:load() takes. A fake handle keeps it, and fake name
+-- lookups stand in for /etc/protocols and /etc/services.
+local names = {
+	protonumber = function(n)
+		return ({ tcp = 6, udp = 17, icmp = 1 })[n]
+	end,
+	servicenumber = function(n)
+		return ({ domain = 53, ssh = 22 })[n]
+	end,
+	icmptype = function(n)
+		return ({ echoreq = 8 })[n]
+	end,
+	uidnumber = function(n)
+		return ({ root = 0 })[n]
+	end,
+}
+local function loaded(build, opts)
 	local rs = dsl.ruleset()
-	rs:pass{ dir = "in" }
-	rs:block{ dir = "out" }
-	local line = debug.getinfo(1, "l").currentline - 1
-	local seen
-	local ok, err = rs:load({ run = function(cmd)
-		seen = cmd
-		local path = cmd:match("-f '([^']+)'")
-		return false, path .. ":2: syntax error\n"
-	end, anchor = "ward/test" })
-	assert(not ok)
-	assert(seen:find("^pfctl %-a 'ward/test' %-n %-f '"), seen)
-	assert(err:find("pf_test_dsl_render.lua:" .. line ..
-	    ": block out: syntax error", 1, true), err)
+	build(rs)
+	local spec
+	opts = opts or {}
+	opts.names = names
+	opts.pf = { load = function(_, s)
+		spec = s
+		return true
+	end }
+	local ok, err = rs:load(opts)
+	return spec, ok, err
 end
 
--- check runs pfctl -n alone; a load runs it, then the real load.
+-- Lists expand in pfctl's order, and pass rules get keep state and flags
+-- S/SA, which pfctl clears again for a protocol other than tcp.
 do
-	local rs = dsl.ruleset()
-	rs:pass{}
-	local cmds = {}
-	local function run(cmd)
-		cmds[#cmds + 1] = cmd
-		return true, ""
+	local spec = loaded(function(rs)
+		rs:pass{ dir = "in", proto = { "tcp", "udp" }, port = { "domain", 22 } }
+	end)
+	local rules = spec.rulesets[1].rules
+	assert(#rules == 4, #rules)
+	local want = { { 6, 53 }, { 6, 22 }, { 17, 53 }, { 17, 22 } }
+	for i, r in ipairs(rules) do
+		assert(r.proto == want[i][1] and r.to.port.lo == want[i][2] and
+		    r.to.port.op == "=", i)
+		assert(r.state.keep == 1)
 	end
-	assert(rs:load({ run = run, check = true }))
-	assert(#cmds == 1 and cmds[1]:find(" %-n "), cmds[1])
-	cmds = {}
-	assert(rs:load({ run = run }))
-	assert(#cmds == 2 and not cmds[2]:find(" %-n "), cmds[2])
+	assert(rules[1].flags == 0x02 and rules[1].flagset == 0x12)
+	assert(rules[3].flags == nil)
+end
+
+-- An address family mismatch drops that combination, as pfctl does.
+do
+	local spec = loaded(function(rs)
+		rs:pass{ from = { "192.0.2.1", "2001:db8::1" }, to = "192.0.2.2" }
+	end)
+	local rules = spec.rulesets[1].rules
+	assert(#rules == 1 and rules[1].af == "inet", #rules)
+end
+
+-- binat-to makes the outbound rule and the inbound one that maps back.
+do
+	local spec = loaded(function(rs)
+		rs:pass{ on = wan, from = "10.0.0.5", binat_to = "192.0.2.5" }
+	end)
+	local rules = spec.rulesets[1].rules
+	assert(#rules == 2)
+	assert(rules[1].direction == "out" and rules[1].nat.addr == "192.0.2.5")
+	assert(rules[1].nat.port_lo == 0 and rules[1].nat.port_hi == 0)
+	assert(rules[2].direction == "in" and rules[2].to.addr == "192.0.2.5")
+	assert(rules[2].rdr.addr == "10.0.0.5" and rules[2].nat == nil)
+end
+
+-- A pool list becomes a const table in the loaded ruleset.
+do
+	local spec = loaded(function(rs)
+		rs:pass{ dir = "in", proto = "tcp", port = 80,
+		    rdr_to = { "192.0.2.10", "192.0.2.11" } }
+	end)
+	local t = spec.rulesets[1].tables[1]
+	local r = spec.rulesets[1].rules[1]
+	assert(t.const and t.name:match("^__automatic_%x+_0$"), t.name)
+	assert(#t.addrs == 2 and r.rdr.type == "table" and r.rdr.name == t.name)
+	assert(r.rdr.method == "round-robin" and r.af == "inet")
+end
+
+-- Options go only with the main ruleset; optimization is a set of
+-- timeouts, and timeout overrides it.
+do
+	local spec = loaded(function(rs)
+		rs:set{ limit = { states = 5000, table_entries = 10 },
+		    optimization = "aggressive", timeout = { tcp_first = 7 },
+		    loginterface = wan, reassemble = false }
+		rs:pass{}
+	end)
+	local o = spec.options
+	assert(o.limits.states == 5000 and o.limits["table-entries"] == 10)
+	assert(o.timeouts["tcp.first"] == 7 and o.timeouts["tcp.closed"] == 30)
+	assert(o.loginterface == "em0" and o.reassemble == false)
+end
+do
+	local _, ok, err = loaded(function(rs)
+		rs:set{ limit = { states = 1 } }
+	end, { anchor = "a" })
+	assert(not ok and err:find("belongs to the main ruleset"), err)
+end
+
+-- check is passed on, and a refused rule is named by its Lua line.
+do
+	local spec = loaded(function(rs) rs:pass{} end, { check = true })
+	assert(spec.check == true)
+	local line
+	local _, ok, err = loaded(function(rs)
+		rs:pass{ proto = "tcp", port = "nosuch" }
+		line = debug.getinfo(1, "l").currentline - 1
+	end)
+	assert(not ok and err:find("pf_test_dsl_render.lua:" .. line ..
+	    ": port: unknown service nosuch/tcp", 1, true), err)
+	assert(select(2, loaded(function(rs) rs:pass{} end, { anchor = "ward/x" })))
 end
 
 print("pf_test_dsl_render: ok")
