@@ -46,7 +46,7 @@ same(function(rs) rs:pass{ to = { wan:addr(), wan:addr0(), wan:network(),
     wan:broadcast(), wan:peer() } } end,
     "pass from any to { (em0), (em0:0), (em0:network), (em0:broadcast), " ..
     "(em0:peer) }\n")
-same(function(rs) rs:pass{ from = dsl.self } end, "pass from self\n")
+same(function(rs) rs:pass{ from = dsl.self } end, "pass from (self)\n")
 same(function(rs) rs:pass{ to = "::" } end, "pass from any to ::\n")
 same(function(rs) rs:pass{ to = "2001:db8:0:1::/64" } end,
     "pass from any to 2001:db8:0:1::/64\n")

@@ -185,6 +185,57 @@ end
 roundtrip(nil)
 roundtrip("services")
 
+-- Without pfctl: commit writes the same kernel rules that load does.
+-- Tables and limiters, as text that two loads can be compared by.
+local function others(anchor)
+	local out = {}
+	for _, t in ipairs(h:tables(anchor or "")) do
+		if (t.anchor or "") == (anchor or "") then
+			local addrs = t:addresses()
+			table.sort(addrs)
+			out[#out + 1] = string.format("<%s> %s %s %s %s", t.name,
+			    tostring(t.persist), tostring(t.const), tostring(t.counters),
+			    table.concat(addrs, " "))
+		end
+	end
+	for _, l in ipairs(h:statelimiters()) do
+		out[#out + 1] = string.format("state %s %d %d %d/%d", l.name, l.id,
+		    l.limit, l.rate.limit, l.rate.seconds)
+	end
+	for _, l in ipairs(h:sourcelimiters()) do
+		out[#out + 1] = string.format("source %s %d %d %d %d/%d %d %d %s",
+		    l.name, l.id, l.entries, l.limit, l.rate.limit, l.rate.seconds,
+		    l.inet_prefix, l.inet6_prefix,
+		    l.overload and l.overload.table .. l.overload.hwm ..
+		    l.overload.lwm or "")
+	end
+	table.sort(out)
+	return table.concat(out, "\n")
+end
+
+local function native(rs, anchor)
+	local before = texts(anchor)
+	local beforeothers = others(anchor)
+	ok, out = rs:commit(h, { anchor = anchor })
+	assert(ok, "commit failed:\n" .. tostring(out))
+	local after = texts(anchor)
+	local wrong = {}
+	for i = 1, math.max(#before, #after) do
+		if before[i] ~= after[i] then
+			wrong[#wrong + 1] = string.format("[%d]\n  pfctl:  %s\n  commit: %s",
+			    i, tostring(before[i]), tostring(after[i]))
+		end
+	end
+	assert(#wrong == 0, "commit differs from pfctl:\n" ..
+	    table.concat(wrong, "\n"))
+	local afterothers = others(anchor)
+	assert(afterothers == beforeothers, "tables or limiters differ:\n" ..
+	    beforeothers .. "\n---\n" .. afterothers)
+end
+native(rs, nil)
+native(sub, "services")
+native(assert(dsl.read(h)), nil)
+
 -- pfctl's errors come back at the Lua line that made the bad rule, and a
 -- refused ruleset leaves the loaded one in place.
 local bad = dsl.ruleset()
@@ -196,6 +247,13 @@ assert(not ok, "pfctl took a rule naming a queue that does not exist")
 assert(out:find("pf_test_dsl.lua:" .. badline .. ":", 1, true),
     "pfctl's error does not name the Lua line:\n" .. out)
 assert(#h:rules() == 16, "a refused load changed the ruleset")
+
+-- commit reports a refused rule at its Lua line and rolls back.
+ok, out = bad:commit(h)
+assert(not ok, "the kernel took a rule naming a queue that does not exist")
+assert(out:find("pf_test_dsl.lua:" .. badline .. ":", 1, true),
+    "commit's error does not name the Lua line:\n" .. out)
+assert(#h:rules() == 16, "a refused commit changed the ruleset")
 
 -- check only runs pfctl -n.
 ok, out = bad:load({ check = true })

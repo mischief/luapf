@@ -1,9 +1,10 @@
--- Build a pf ruleset as Lua data, check it, render it as pf.conf text and
--- load it with pfctl(8).
+--- Build a pf ruleset as Lua data, check it, and load it.
 --
 -- Each constructor checks its arguments when it is called. An error names
 -- the Lua file and line of the call, and of the function call around it.
--- examples/dsl.lua shows the interface.
+-- load uses pfctl(8); commit writes to the kernel directly. read and
+-- tolua turn a loaded ruleset back into Lua. See examples/dsl.lua.
+-- @module pf.dsl
 
 local M = {}
 
@@ -245,11 +246,15 @@ local function ifname(name, sites, what)
 end
 
 --- An interface. Its addresses are dynamic: they follow the interface.
+-- @string name interface name
+-- @treturn Iface
 function M.iface(name)
 	return setmetatable({ name = ifname(name, where(), "iface") }, Iface)
 end
 
 --- An interface group, such as egress. Membership can change at run time.
+-- @string name group name
+-- @treturn Iface
 function M.group(name)
 	return setmetatable({ name = ifname(name, where(), "group"),
 	    group = true }, Iface)
@@ -262,20 +267,33 @@ local function dyn(self, mod, what)
 	return value("dyn", { name = self.name, mod = mod, group = self.group })
 end
 
+--- An interface or group, from iface or group. Use it as on or
+-- received_on, or take an address from it.
+-- @type Iface
+
 --- All addresses of the interface, as (name).
+-- @return address
 function Iface:addr() return dyn(self, "", "addr") end
 --- The first address of the interface, as (name:0).
+-- @return address
 function Iface:addr0() return dyn(self, ":0", "addr0") end
 --- The networks of the interface, as (name:network).
+-- @return address
 function Iface:network() return dyn(self, ":network", "network") end
 --- The broadcast addresses of the interface, as (name:broadcast).
+-- @return address
 function Iface:broadcast() return dyn(self, ":broadcast", "broadcast") end
 --- The peer address of a point-to-point interface, as (name:peer).
+-- @return address
 function Iface:peer() return dyn(self, ":peer", "peer") end
 
 Iface.__tostring = function(self) return self.name end
 
+--- @section end
+
+--- Any address.
 M.any = value("any", {})
+--- Every address of this host, dynamic, as (self).
 M.self = value("self", {})
 
 --
@@ -293,8 +311,11 @@ end
 local tableopts = { persist = true, const = true, counters = true,
     file = true, addrs = true }
 
---- A table. opts: persist, const, counters (booleans), file (a path or a
--- list of paths), addrs (a list of literal addresses).
+--- A table. Rules that name it define it in the loaded ruleset.
+-- @string name table name
+-- @tab[opt] opts persist, const, counters (booleans), file (a path or a
+-- list of paths), addrs (a list of literal addresses, or NOT of one)
+-- @return table
 function M.table(name, opts)
 	local sites = where()
 	local t = value("table", { name = tablename(name, sites),
@@ -404,7 +425,9 @@ local function limiter(kind, name, opts, known, sites)
 end
 
 --- A state limiter: it caps the states the rules that name it create.
--- opts: id (1 to 255), limit, rate ({ states, seconds }).
+-- @string name limiter name
+-- @tab opts id (1 to 255), limit, rate ({ states, seconds })
+-- @return limiter
 function M.statelimiter(name, opts)
 	local sites = where()
 	local l = limiter("state", name, opts,
@@ -418,8 +441,10 @@ function M.statelimiter(name, opts)
 end
 
 --- A source limiter: it caps the states each source address creates.
--- opts: id (1 to 255), entries, limit, rate ({ states, seconds }),
--- inet_mask, inet6_mask, overload (a table), above, below.
+-- @string name limiter name
+-- @tab opts id (1 to 255), entries, limit, rate ({ states, seconds }),
+-- `inet_mask`, `inet6_mask`, overload (a table), above, below
+-- @return limiter
 function M.sourcelimiter(name, opts)
 	local sites = where()
 	local l = limiter("source", name, opts, { id = true, entries = true,
@@ -470,6 +495,8 @@ end
 local address
 
 --- The negation of an address or an interface.
+-- @param x an address, or an Iface for on and received_on
+-- @return negated address or interface
 function M.NOT(x)
 	local sites = where()
 	if getmetatable(x) == Iface then
@@ -532,8 +559,11 @@ local function raddr(v)
 		return "(" .. v.name .. v.mod .. ")"
 	elseif k == "table" then
 		return "<" .. v.name .. ">"
-	elseif k == "any" or k == "self" then
+	elseif k == "any" then
 		return k
+	elseif k == "self" then
+		-- Dynamic, unlike a bare self, which pfctl expands at load time.
+		return "(self)"
 	elseif k == "not" then
 		return "! " .. raddr(v.inner)
 	elseif k == "list" then
@@ -572,6 +602,9 @@ local function portnum(v)
 end
 
 --- A port range, lo:hi inclusive.
+-- @int lo first port
+-- @int hi last port
+-- @return port
 function M.range(lo, hi)
 	local sites = where()
 	if not isint(lo, 0, 65535) or not isint(hi, 0, 65535) or lo > hi then
@@ -580,8 +613,12 @@ function M.range(lo, hi)
 	return value("port", { text = lo .. ":" .. hi, op = ":", a = lo, b = hi })
 end
 
---- A port with an operator: port("!=", 22), port("<", 1024),
--- port("><", 1000, 2000).
+--- A port with an operator.
+-- @string op =, !=, <, <=, >, >=, >< or <>
+-- @int a port
+-- @int[opt] b second port, for >< and <>
+-- @return port
+-- @usage dsl.port("<", 1024)
 function M.port(op, a, b)
 	local sites = where()
 	if not portops[op] then
@@ -624,9 +661,12 @@ end
 local poolmethods = { ["round-robin"] = true, random = true,
     ["source-hash"] = true, bitmask = true, ["least-states"] = true }
 
---- A translation target with options. opts: port (a port or a range),
--- method (round-robin, random, source-hash, bitmask, least-states),
--- sticky (boolean).
+--- A translation target with options, for `nat_to`, `rdr_to` and
+-- `binat_to`.
+-- @param addr address
+-- @tab[opt] opts port (a port or a range), method (round-robin, random,
+-- source-hash, bitmask, least-states), sticky (boolean)
+-- @return pool
 function M.pool(addr, opts)
 	local sites = where()
 	local p = value("pool", { addr = address(addr, sites, "pool"),
@@ -1109,26 +1149,44 @@ local Ruleset = {}
 Ruleset.__index = Ruleset
 
 --- A new empty ruleset.
+-- @treturn Ruleset
 function M.ruleset()
 	return setmetatable({ items = {}, options = {}, declared = {},
 	    limiters = {},
 	    sites = where() }, Ruleset)
 end
 
---- Append a pass rule.
+--- A list of rules with the tables, limiters and options they need.
+-- @type Ruleset
+
+--- Append a pass rule. Every option is checked now.
+--
+-- Filter: `dir quick log on af proto from to port from_port flags
+-- icmp_type icmp6_type user label tagged received_on once`. log is true
+-- or { all, matches, user, to }. Pass only: `allow_opts state_limiter
+-- source_limiter state`, where state is false or a table of `kind max
+-- max_src_states max_src_nodes max_src_conn max_src_conn_rate overload
+-- flush source_track if_bound floating sloppy no_sync pflow`. Pass and
+-- match: `tag prio queue rtable nat_to rdr_to binat_to`.
+-- @tab opts rule options
+-- @treturn Ruleset self
 function Ruleset:pass(opts)
 	self.items[#self.items + 1] = rule("pass", opts, where())
 	return self
 end
 
---- Append a block rule. opts.policy picks drop, return, return-rst or
--- return-icmp.
+--- Append a block rule. It takes the filter options of pass, and policy:
+-- drop, return, return-rst or return-icmp.
+-- @tab opts rule options
+-- @treturn Ruleset self
 function Ruleset:block(opts)
 	self.items[#self.items + 1] = rule("block", opts, where())
 	return self
 end
 
---- Append a match rule.
+--- Append a match rule. It takes the options pass and match share.
+-- @tab opts rule options
+-- @treturn Ruleset self
 function Ruleset:match(opts)
 	self.items[#self.items + 1] = rule("match", opts, where())
 	return self
@@ -1151,8 +1209,11 @@ local function anchorname(name, sites)
 	return name
 end
 
---- Call an anchor. opts take the rule filter options. opts.rules is a
--- ruleset to load inline; otherwise the anchor is loaded on its own.
+--- Call an anchor.
+-- @string name anchor name; a last component of * calls every child
+-- @tab[opt] opts `dir quick on af proto from to port from_port tagged
+-- received_on`, and rules: a Ruleset to load inline
+-- @treturn Ruleset self
 function Ruleset:anchor(name, opts)
 	local sites = where()
 	anchorname(name, sites)
@@ -1184,6 +1245,8 @@ function Ruleset:anchor(name, opts)
 end
 
 --- Declare a table the rules do not name, such as one only pfctl -T fills.
+-- @param t a table from dsl.table
+-- @treturn Ruleset self
 function Ruleset:table(t)
 	if not isvalue(t, "table") then
 		fail(where(), "table: not a table")
@@ -1193,6 +1256,8 @@ function Ruleset:table(t)
 end
 
 --- Declare a limiter the rules do not name, such as one only anchors use.
+-- @param l a limiter from dsl.statelimiter or dsl.sourcelimiter
+-- @treturn Ruleset self
 function Ruleset:limiter(l)
 	if not isvalue(l, "limiter") then
 		fail(where(), "limiter: not a limiter")
@@ -1272,8 +1337,10 @@ local function setline(k, v, sites)
 	end
 end
 
---- Set ruleset options: skip, block_policy, optimization, loginterface,
--- state_policy, reassemble, limit, timeout, state_defaults.
+--- Set ruleset options. Each option can be set once.
+-- @tab opts `skip block_policy optimization loginterface state_policy
+-- reassemble limit timeout state_defaults`
+-- @treturn Ruleset self
 function Ruleset:set(opts)
 	local sites = where()
 	if type(opts) ~= "table" then
@@ -1377,8 +1444,10 @@ local function emit(rs, lines, map, indent)
 	end
 end
 
--- Render to lines, and map each line to the sites that made it. Limiters
--- belong to the main ruleset, so an anchor leaves them out.
+--- The ruleset as pf.conf lines, and the Lua call site of each line.
+-- @bool[opt] anchor leave out what only the main ruleset can hold
+-- @treturn {string,...} lines
+-- @treturn table call sites by line number
 function Ruleset:lines(anchor)
 	local lines, map = {}, {}
 	local keys = {}
@@ -1409,6 +1478,7 @@ function Ruleset:lines(anchor)
 end
 
 --- The ruleset as pf.conf text.
+-- @treturn string
 function Ruleset:render()
 	local lines = self:lines()
 	return table.concat(lines, "\n") .. "\n"
@@ -1428,10 +1498,14 @@ local function shquote(s)
 	return "'" .. s:gsub("'", "'\\''") .. "'"
 end
 
---- Check the ruleset with pfctl -n, then load it. opts: anchor (load into
--- this anchor), check (check only), pfctl (the command to run), run (a
--- function(cmd) that returns ok, output). Returns true and pfctl's output,
--- or nil and an error whose pf.conf line numbers name Lua call sites.
+--- Check the ruleset with pfctl -n, then load it with pfctl.
+-- @tab[opt] opts anchor (load into this anchor), check (check only),
+-- pfctl (the command to run), run (a function(cmd) that returns ok and
+-- output)
+-- @treturn[1] boolean true
+-- @treturn[1] string pfctl's output
+-- @return[2] nil
+-- @treturn[2] string error, with pf.conf lines given as Lua call sites
 function Ruleset:load(opts)
 	opts = opts or {}
 	local sites = where()
@@ -1468,6 +1542,446 @@ function Ruleset:load(opts)
 		return nil, out
 	end
 	return true, out
+end
+
+--
+-- Native load: the ruleset straight into the kernel, without pfctl
+--
+
+local tcpflags = { F = 0x01, S = 0x02, R = 0x04, P = 0x08, A = 0x10,
+    U = 0x20, E = 0x40, W = 0x80 }
+
+local function flagbits(s)
+	local n = 0
+	for ch in s:gmatch(".") do
+		n = n | tcpflags[ch]
+	end
+	return n
+end
+
+local function items(v)
+	if v.kind == "list" then
+		return v.items
+	end
+	return { v }
+end
+
+-- An address as h:load() takes it, and its family when it has one.
+local function nativeaddr(v, sites, what)
+	local neg = false
+	if v.kind == "not" then
+		v, neg = v.inner, true
+	end
+	local a
+	if v.kind == "any" then
+		a = { type = "any" }
+	elseif v.kind == "addr" then
+		local text, bits = v.text:match("^([^/]+)/?(%d*)$")
+		a = { type = "addr", addr = text, af = v.af,
+		    bits = tonumber(bits) or (v.af == "inet" and 32 or 128) }
+	elseif v.kind == "dyn" then
+		a = { type = "dyn", name = v.name, network = v.mod == ":network",
+		    broadcast = v.mod == ":broadcast", peer = v.mod == ":peer",
+		    first = v.mod == ":0" }
+	elseif v.kind == "self" then
+		a = { type = "dyn", name = "self" }
+	elseif v.kind == "table" then
+		a = { type = "table", name = v.name }
+	else
+		fail(sites, "%s: commit cannot load %s", what, v.kind)
+	end
+	a.neg = neg
+	return a, v.af
+end
+
+-- Every port a port option names, for one protocol.
+local function nativeports(v, proto, sites, what, pf)
+	if v == nil then
+		return { false }
+	end
+	local list = isarray(v) and v or { v }
+	local out = {}
+	for _, p in ipairs(list) do
+		if math.type(p) == "integer" then
+			out[#out + 1] = { op = "=", lo = p, hi = 0 }
+		elseif type(p) == "string" then
+			local n = pf.servicenumber(p, proto or "tcp")
+			if not n then
+				fail(sites, "%s: unknown service %s/%s", what, p, proto or "tcp")
+			end
+			out[#out + 1] = { op = "=", lo = n, hi = 0 }
+		else
+			out[#out + 1] = { op = p.op, lo = p.a, hi = p.b or 0 }
+		end
+	end
+	return out
+end
+
+local function nativepool(v, proto, sites, what, pf)
+	local p = isvalue(v, "pool") and v or value("pool", { addr = v, opts = {} })
+	if p.addr.kind == "list" then
+		fail(sites, "%s: commit cannot load a pool list; use a table", what)
+	end
+	local a, paf = nativeaddr(p.addr, sites, what)
+	local port = p.opts.port
+	if type(port) == "string" then
+		port = pf.servicenumber(port, proto or "tcp") or
+		    fail(sites, "%s: unknown service %s/%s", what, port, proto or "tcp")
+	end
+	if what == "nat_to" then
+		if port == nil then
+			a.port_lo, a.port_hi = 50001, 65535
+		elseif isvalue(port, "port") then
+			a.port_lo, a.port_hi = port.a, port.b
+		else
+			a.port_lo, a.port_hi = port, port
+		end
+	elseif port ~= nil then
+		if isvalue(port, "port") then
+			a.port_lo, a.port_hi, a.port_op = port.a, port.b, port.op
+		else
+			a.port_lo, a.port_hi = port, 0
+		end
+	end
+	a.method = p.opts.method
+	if not a.method and (a.type == "table" or (a.type == "dyn" and not a.first)) then
+		a.method = "round-robin"
+	end
+	a.sticky = p.opts.sticky
+	return a, paf
+end
+
+-- The state a pass rule keeps, the way pfctl fills it in.
+local function nativestate(opts, rsopts, proto, out)
+	local st = opts.state
+	if st == false then
+		return 0
+	end
+	local defaults = st == nil
+	if defaults then
+		st = rsopts.state_defaults and rsopts.state_defaults.value or {}
+	end
+	local keep = st.kind == "modulate" and 2 or st.kind == "synproxy" and 3 or 1
+	if keep > 1 and proto and proto ~= 6 then
+		keep = 1
+	end
+	local s = { keep = keep, timeouts = {} }
+	for _, k in ipairs({ "max", "max_src_states", "max_src_nodes",
+	    "max_src_conn" }) do
+		s[k] = st[k]
+	end
+	local track, rule = st.source_track, false
+	if st.max_src_conn_rate then
+		s.max_src_conn_rate = { limit = st.max_src_conn_rate[1],
+		    seconds = st.max_src_conn_rate[2] }
+	end
+	if st.max_src_states then
+		track = track or true
+	end
+	if st.max_src_conn or st.max_src_conn_rate or st.max_src_nodes then
+		track, rule = track or true, true
+	end
+	if track then
+		out.source_track = (rule or track == "rule") and "rule" or "global"
+		local secs = s.max_src_conn_rate and s.max_src_conn_rate.seconds or 0
+		if secs > 0 then
+			s.timeouts["src.track"] = secs
+		end
+	end
+	if st.max then
+		s.timeouts["adaptive.start"] = st.max // 10 * 6
+		s.timeouts["adaptive.end"] = st.max // 10 * 12
+	end
+	if st.overload then
+		s.overload = st.overload.name
+		s.flush = st.flush
+	end
+	if st.if_bound then
+		out.if_bound = true
+	elseif not st.floating and rsopts.state_policy and
+	    rsopts.state_policy.value == "if-bound" then
+		out.if_bound = true
+	end
+	out.sloppy, out.no_sync, out.pflow = st.sloppy, st.no_sync, st.pflow
+	out.state = s
+	return keep
+end
+
+-- One dsl rule as the kernel rules pfctl would expand it to.
+local function nativerule(r, rsopts, pf, out)
+	local opts, sites, action = r.opts, r.sites, r.action
+	local anchor = action == "anchor"
+	local base = { where = sitestr(sites), action = anchor and "pass" or action,
+	    anchor_call = r.name, direction = opts.dir, quick = opts.quick,
+	    label = opts.label, tag = opts.tag, tagged = opts.tagged,
+	    rtable = opts.rtable, once = opts.once, allow_opts = opts.allow_opts }
+	if action == "block" then
+		base.policy = opts.policy or (rsopts.block_policy and
+		    rsopts.block_policy.value == "return" and "return") or nil
+		if base.policy == "drop" then
+			base.policy = nil
+		end
+	end
+	if opts.log == true then
+		base.log = {}
+	elseif type(opts.log) == "table" then
+		base.log = { all = opts.log.all, matches = opts.log.matches,
+		    user = opts.log.user }
+		if opts.log.to then
+			base.log.to = tonumber(opts.log.to.name:match("^pflog(%d+)$"))
+		end
+	end
+	if opts.prio then
+		base.prio = math.type(opts.prio) == "integer" and
+		    { opts.prio, opts.prio } or opts.prio
+	end
+	if opts.queue then
+		base.queue = type(opts.queue) == "string" and { opts.queue } or opts.queue
+	end
+	if opts.received_on then
+		local v = opts.received_on
+		base.received_on = getmetatable(v) == Iface and { name = v.name } or
+		    { name = v.inner.name, neg = true }
+	end
+	if opts.user ~= nil then
+		base.uid = math.type(opts.user) == "integer" and opts.user or
+		    pf.uidnumber(opts.user) or
+		    fail(sites, "%s: unknown user %s", action, opts.user)
+	end
+	for _, k in ipairs({ "state_limiter", "source_limiter" }) do
+		local v = opts[k]
+		if v then
+			local l = isvalue(v) and v or v[1]
+			base[k] = { id = l.id, action = not isvalue(v) and v.action or nil }
+		end
+	end
+	if opts.binat_to then
+		fail(sites, "%s: commit cannot load binat-to yet; use load()", action)
+	end
+
+	local ifs = { false }
+	if opts.on then
+		local v = opts.on
+		if getmetatable(v) == Iface then
+			ifs = { { name = v.name } }
+		elseif isvalue(v, "not") then
+			ifs = { { name = v.inner.name, neg = true } }
+		else
+			ifs = {}
+			for i, x in ipairs(v) do
+				ifs[i] = { name = x.name }
+			end
+		end
+	end
+	local protos = { false }
+	if opts.proto then
+		protos = {}
+		for i, p in ipairs(isarray(opts.proto) and opts.proto or { opts.proto }) do
+			local n = math.type(p) == "integer" and p or pf.protonumber(p)
+			if not n then
+				fail(sites, "%s: unknown protocol %s", action, p)
+			end
+			protos[i] = { n = n, name = tostring(p) }
+		end
+	end
+	local srcs = items(address(opts.from or M.any, sites, "from"))
+	local dsts = items(address(opts.to or M.any, sites, "to"))
+
+	-- A list whose literals all share one family decides the rule's.
+	local af0 = opts.af
+	for _, list in ipairs({ srcs, dsts }) do
+		if not af0 then
+			local seen
+			for _, v in ipairs(list) do
+				local x = v.kind == "not" and v.inner or v
+				if x.kind ~= "addr" or (seen and seen ~= x.af) then
+					seen = false
+					break
+				end
+				seen = x.af
+			end
+			af0 = seen or nil
+		end
+	end
+
+	local added = 0
+	for _, i in ipairs(ifs) do
+	for _, p in ipairs(protos) do
+	for _, src in ipairs(srcs) do
+	for _, dst in ipairs(dsts) do
+	local pname = p and p.name or nil
+	for _, sp in ipairs(nativeports(opts.from_port, pname, sites, "from_port", pf)) do
+	for _, dp in ipairs(nativeports(opts.port, pname, sites, "port", pf)) do
+		local x = {}
+		for k, v in pairs(base) do
+			x[k] = v
+		end
+		local af = af0
+		for _, k in ipairs({ "nat_to", "rdr_to" }) do
+			if opts[k] then
+				local pool, paf = nativepool(opts[k], pname, sites, k, pf)
+				if af and paf and af ~= paf then
+					fail(sites, "%s: %s address in an %s rule", action, paf, af)
+				end
+				af = af or paf
+				x[k == "nat_to" and "nat" or "rdr"] = pool
+			end
+		end
+		local s, saf = nativeaddr(src, sites, "from")
+		local d, daf = nativeaddr(dst, sites, "to")
+		if not ((af and saf and af ~= saf) or (af and daf and af ~= daf) or
+		    (saf and daf and saf ~= daf)) then
+			af = af or saf or daf
+			x.af = af
+			s.port = sp or nil
+			d.port = dp or nil
+			x.from, x.to = s, d
+			if i then
+				x.ifname, x.ifnot = i.name, i.neg
+			end
+			x.proto = p and p.n or nil
+			local tcp = not p or p.n == 6
+			for _, k in ipairs({ "icmp_type", "icmp6_type" }) do
+				local t = opts[k]
+				if t ~= nil then
+					x.icmp_type = math.type(t) == "integer" and t or
+					    pf.icmptype(t, k == "icmp6_type" and "inet6" or "inet") or
+					    fail(sites, "%s: unknown %s %s", action, k, t)
+				end
+			end
+			local keep = 0
+			if action == "pass" then
+				keep = nativestate(opts, rsopts, p and p.n, x)
+			end
+			if opts.flags == "any" then
+				x.flags, x.flagset = 0, 0
+			elseif opts.flags then
+				local a, b = opts.flags:match("^(.*)/(.*)$")
+				x.flags, x.flagset = flagbits(a), flagbits(b)
+			elseif action == "pass" and keep ~= 0 then
+				x.flags, x.flagset = tcpflags.S, tcpflags.S | tcpflags.A
+			end
+			if not tcp then
+				x.flags, x.flagset = nil, nil
+			end
+			out[#out + 1] = x
+			added = added + 1
+		end
+	end end end end end end
+	if added == 0 then
+		fail(sites, "%s: rule expands to no valid combination", action)
+	end
+end
+
+local function tableaddrs(t, sites)
+	local out = {}
+	local function add(s)
+		local neg = s:sub(1, 1) == "!"
+		if neg then
+			s = s:sub(2)
+		end
+		local p, err = parseaddr(s)
+		if not p then
+			fail(sites, "table <%s>: %s", t.name, err)
+		end
+		local text, bits = s:match("^([^/]+)/?(%d*)$")
+		out[#out + 1] = { addr = text, af = p.af, neg = neg,
+		    bits = tonumber(bits) or (p.af == "inet" and 32 or 128) }
+	end
+	for _, a in ipairs(t.addrs) do
+		add(a)
+	end
+	for _, f in ipairs(t.files) do
+		local fh, err = io.open(f)
+		if not fh then
+			fail(sites, "table <%s>: %s", t.name, err)
+		end
+		for line in fh:lines() do
+			line = line:gsub("#.*", "")
+			for word in line:gmatch("%S+") do
+				add(word)
+			end
+		end
+		fh:close()
+	end
+	return (#t.addrs > 0 or #t.files > 0) and out or nil
+end
+
+-- The argument h:load() takes.
+local function nativespec(rs, anchor, pf)
+	local unsupported = { "limit", "timeout", "optimization", "loginterface",
+	    "reassemble" }
+	for _, k in ipairs(unsupported) do
+		if rs.options[k] then
+			fail(rs.options[k].sites, "set: commit cannot set %s yet; use load()", k)
+		end
+	end
+	local spec = { rulesets = {} }
+	local lims = {}
+	if anchor == "" then
+		limiters(rs, lims, {})
+	end
+	local tables = {}
+	collect(rs, tables, {}, lims)
+	local function ruleset(r, path, tbls)
+		local entry = { anchor = path, rules = {}, tables = {} }
+		spec.rulesets[#spec.rulesets + 1] = entry
+		for _, t in ipairs(tbls) do
+			entry.tables[#entry.tables + 1] = { name = t.name,
+			    persist = t.persist, const = t.const, counters = t.counters,
+			    addrs = tableaddrs(t, t.sites) }
+		end
+		for _, item in ipairs(r.items) do
+			nativerule(item, rs.options, pf, entry.rules)
+			if item.inline then
+				ruleset(item.inline, path == "" and item.name or
+				    path .. "/" .. item.name, {})
+			end
+		end
+	end
+	ruleset(rs, anchor, tables)
+	spec.statelimiters, spec.sourcelimiters = {}, {}
+	for _, l in ipairs(lims) do
+		local o = l.opts
+		local e = { name = l.name, id = l.id, limit = o.limit,
+		    entries = o.entries, inet_mask = o.inet_mask,
+		    inet6_mask = o.inet6_mask, above = o.above, below = o.below,
+		    overload = o.overload and o.overload.name }
+		if o.rate then
+			e.rate_limit, e.rate_seconds = o.rate[1], o.rate[2]
+		end
+		local list = l.which == "state" and spec.statelimiters or
+		    spec.sourcelimiters
+		list[#list + 1] = e
+	end
+	if rs.options.skip and anchor == "" then
+		local v = rs.options.skip.value
+		spec.skip = {}
+		for i, x in ipairs(isarray(v) and v or { v }) do
+			spec.skip[i] = getmetatable(x) == Iface and x.name or x
+		end
+	end
+	return spec
+end
+
+--- Load the ruleset straight into the kernel in one transaction, with no
+-- pfctl. It expands and fills in rules the way pfctl does.
+-- @param h a handle from pf.open
+-- @tab[opt] opts anchor (load into this anchor)
+-- @treturn[1] boolean true
+-- @return[2] nil
+-- @treturn[2] string error that names the Lua line of the rule
+function Ruleset:commit(h, opts)
+	opts = opts or {}
+	local ok, err = pcall(function()
+		local pf = require("pf")
+		local anchor = opts.anchor and anchorname(opts.anchor, where()) or ""
+		return h:load(nativespec(self, anchor, pf))
+	end)
+	if not ok then
+		return nil, err
+	end
+	return true
 end
 
 --
@@ -1570,6 +2084,7 @@ end
 
 --- The ruleset as Lua source. Running the source returns an equal
 -- ruleset.
+-- @treturn string
 function Ruleset:tolua()
 	local out = { 'local dsl = require("pf.dsl")', "local T, L = {}, {}" }
 	local ctx = {}
@@ -1712,7 +2227,7 @@ local function readport(p)
 end
 
 -- Properties pf.dsl has no option for. A rule with one cannot be read.
-local unsupported = { "user", "group", "os_fingerprint", "probability",
+local unsupported = { "group", "os_fingerprint", "probability",
     "tos", "set_tos", "divert", "rdomain", "delay", "max_pkt_rate",
     "min_ttl", "max_mss", "return_ttl" }
 local unsupportedflags = { "af_to", "fragment", "no_df", "random_id",
@@ -1835,8 +2350,8 @@ local function readrule(r, tables, lims, sites)
 					tm["src.track"] = nil
 				end
 			end
-			if st.max and tm["adaptive.start"] == st.max * 6 // 10 and
-			    tm["adaptive.end"] == st.max * 12 // 10 then
+			if st.max and tm["adaptive.start"] == st.max // 10 * 6 and
+			    tm["adaptive.end"] == st.max // 10 * 12 then
 				tm["adaptive.start"], tm["adaptive.end"] = nil, nil
 			end
 			local k = next(tm)
@@ -1866,6 +2381,14 @@ local function readrule(r, tables, lims, sites)
 				o.state = so
 			end
 		end
+	end
+	if r.user then
+		local uid = r.user:match("^= (%d+)$")
+		if not uid then
+			fail(sites, "pf.dsl has no user %s", r.user)
+		end
+		uid = tonumber(uid)
+		o.user = uid == 0xffffffff and "unknown" or uid
 	end
 	if r.label ~= "" then
 		o.label = r.label
@@ -1914,11 +2437,15 @@ local function readrule(r, tables, lims, sites)
 	return o
 end
 
---- Read a ruleset back from the kernel. h is a pf handle, and anchor
--- names the ruleset (the main one when it is nil). Returns a ruleset, or
--- nil and an error that names the first rule pf.dsl cannot express.
--- Tables come back with their flags; only const tables keep their
--- addresses, since the others hold data rather than configuration.
+--- @section end
+
+--- Read a ruleset back from the kernel. Tables keep their flags; only
+-- const tables keep their addresses, since others hold data.
+-- @param h a handle from pf.open
+-- @string[opt] anchor the ruleset to read; the main one when nil
+-- @treturn[1] Ruleset
+-- @return[2] nil
+-- @treturn[2] string error that names the first rule pf.dsl cannot express
 function M.read(h, anchor)
 	local ok, rs = pcall(function()
 		local tables = {}
