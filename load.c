@@ -10,8 +10,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include <sys/ioctl.h>
 #include <sys/types.h>
+#include <sys/ioctl.h>
+#include <sys/sysctl.h>
 
 #include <arpa/inet.h>
 #include <net/if.h>
@@ -630,6 +631,200 @@ loadsourcelim(struct loadctx *c, int idx, uint32_t tk)
 	c->where[0] = '\0';
 }
 
+static const struct {
+	const char *name;
+	int index;
+} limitnames[] = {
+    {"states",        PF_LIMIT_STATES       },
+    {"src-nodes",     PF_LIMIT_SRC_NODES    },
+    {"frags",         PF_LIMIT_FRAGS        },
+    {"tables",        PF_LIMIT_TABLES       },
+    {"table-entries", PF_LIMIT_TABLE_ENTRIES},
+    {"pktdelay",      PF_LIMIT_PKTDELAY_PKTS},
+    {"anchors",       PF_LIMIT_ANCHORS      },
+};
+
+static const struct {
+	const char *name;
+	int index;
+	unsigned int def;
+} timeoutdefs[] = {
+    {"tcp.first",      PFTM_TCP_FIRST_PACKET,   PFTM_TCP_FIRST_PACKET_VAL  },
+    {"tcp.opening",    PFTM_TCP_OPENING,        PFTM_TCP_OPENING_VAL       },
+    {"tcp.established", PFTM_TCP_ESTABLISHED,   PFTM_TCP_ESTABLISHED_VAL   },
+    {"tcp.closing",    PFTM_TCP_CLOSING,        PFTM_TCP_CLOSING_VAL       },
+    {"tcp.finwait",    PFTM_TCP_FIN_WAIT,       PFTM_TCP_FIN_WAIT_VAL      },
+    {"tcp.closed",     PFTM_TCP_CLOSED,         PFTM_TCP_CLOSED_VAL        },
+    {"tcp.tsdiff",     PFTM_TS_DIFF,            PFTM_TS_DIFF_VAL           },
+    {"udp.first",      PFTM_UDP_FIRST_PACKET,   PFTM_UDP_FIRST_PACKET_VAL  },
+    {"udp.single",     PFTM_UDP_SINGLE,         PFTM_UDP_SINGLE_VAL        },
+    {"udp.multiple",   PFTM_UDP_MULTIPLE,       PFTM_UDP_MULTIPLE_VAL      },
+    {"icmp.first",     PFTM_ICMP_FIRST_PACKET,  PFTM_ICMP_FIRST_PACKET_VAL },
+    {"icmp.error",     PFTM_ICMP_ERROR_REPLY,   PFTM_ICMP_ERROR_REPLY_VAL  },
+    {"other.first",    PFTM_OTHER_FIRST_PACKET, PFTM_OTHER_FIRST_PACKET_VAL},
+    {"other.single",   PFTM_OTHER_SINGLE,       PFTM_OTHER_SINGLE_VAL      },
+    {"other.multiple", PFTM_OTHER_MULTIPLE,     PFTM_OTHER_MULTIPLE_VAL    },
+    {"frag",           PFTM_FRAG,               PFTM_FRAG_VAL              },
+    {"interval",       PFTM_INTERVAL,           PFTM_INTERVAL_VAL          },
+    {"adaptive.start", PFTM_ADAPTIVE_START,     PFSTATE_ADAPT_START        },
+    {"adaptive.end",   PFTM_ADAPTIVE_END,       PFSTATE_ADAPT_END          },
+    {"src.track",      PFTM_SRC_NODE,           PFTM_SRC_NODE_VAL          },
+};
+
+#define NITEMS(a) (sizeof(a) / sizeof((a)[0]))
+
+/* The value of name in the table at field k of idx, or -1. */
+static lua_Integer
+optentry(lua_State *L, int idx, const char *k, const char *name)
+{
+	lua_Integer v = -1;
+
+	lua_getfield(L, idx, k);
+	if (lua_istable(L, -1)) {
+		lua_getfield(L, -1, name);
+		if (lua_isinteger(L, -1))
+			v = lua_tointeger(L, -1);
+		lua_pop(L, 1);
+	}
+	lua_pop(L, 1);
+
+	return v;
+}
+
+/*
+ * The limits pfctl -f sets: states goes back to its default unless set,
+ * and the others keep the kernel's value. A small host gets fewer table
+ * entries.
+ */
+static void
+setlimits(struct loadctx *c, int idx, unsigned int limits[PF_LIMIT_MAX])
+{
+	struct pfioc_limit pl;
+	int mib[2];
+	int64_t mem;
+	int mcl;
+	size_t size;
+
+	for (int i = 0; i < PF_LIMIT_MAX; i++) {
+		memset(&pl, 0, sizeof(pl));
+		pl.index = i;
+		if (ioctl(c->fd, DIOCGETLIMIT, &pl) == -1)
+			loadfail(c, "DIOCGETLIMIT: %s", strerror(errno));
+		limits[i] = pl.limit;
+	}
+	limits[PF_LIMIT_STATES] = PFSTATE_HIWAT;
+	if (limits[PF_LIMIT_FRAGS] == 0) {
+		mib[0] = CTL_KERN;
+		mib[1] = KERN_MAXCLUSTERS;
+		size = sizeof(mcl);
+		if (sysctl(mib, 2, &mcl, &size, NULL, 0) == -1)
+			loadfail(c, "sysctl kern.maxclusters: %s", strerror(errno));
+		limits[PF_LIMIT_FRAGS] = (unsigned int)mcl / 4;
+	}
+	mib[0] = CTL_HW;
+	mib[1] = HW_PHYSMEM64;
+	size = sizeof(mem);
+	if (sysctl(mib, 2, &mem, &size, NULL, 0) == -1)
+		loadfail(c, "sysctl hw.physmem: %s", strerror(errno));
+	if (mem <= 100 * 1024 * 1024)
+		limits[PF_LIMIT_TABLE_ENTRIES] = PFR_KENTRY_HIWAT_SMALL;
+
+	for (size_t i = 0; i < NITEMS(limitnames); i++) {
+		lua_Integer v = optentry(c->L, idx, "limits", limitnames[i].name);
+
+		if (v >= 0)
+			limits[limitnames[i].index] = (unsigned int)v;
+	}
+	for (int i = 0; i < PF_LIMIT_MAX; i++) {
+		memset(&pl, 0, sizeof(pl));
+		pl.index = i;
+		pl.limit = limits[i];
+		if (ioctl(c->fd, DIOCSETLIMIT, &pl) == -1)
+			loadfail(c, "cannot set limit %d to %u: %s", i, limits[i],
+			         strerror(errno));
+	}
+}
+
+/*
+ * Every timeout goes back to its default unless set. A states limit with
+ * no adaptive timeouts sets them to 60% and 120% of it, as pfctl does.
+ */
+static void
+settimeouts(struct loadctx *c, int idx, unsigned int states)
+{
+	unsigned int tm[PFTM_MAX];
+	bool adaptive = false;
+	struct pfioc_tm pt;
+
+	memset(tm, 0, sizeof(tm));
+	for (size_t i = 0; i < NITEMS(timeoutdefs); i++) {
+		lua_Integer v = optentry(c->L, idx, "timeouts",
+		                         timeoutdefs[i].name);
+
+		tm[timeoutdefs[i].index] = timeoutdefs[i].def;
+		if (v >= 0) {
+			tm[timeoutdefs[i].index] = (unsigned int)v;
+			if (timeoutdefs[i].index == PFTM_ADAPTIVE_START ||
+			    timeoutdefs[i].index == PFTM_ADAPTIVE_END)
+				adaptive = true;
+		}
+	}
+	if (optentry(c->L, idx, "limits", "states") >= 0 && !adaptive) {
+		tm[PFTM_ADAPTIVE_START] = (states / 10) * 6;
+		tm[PFTM_ADAPTIVE_END] = (states / 10) * 12;
+	}
+	for (int i = 0; i < PFTM_MAX; i++) {
+		memset(&pt, 0, sizeof(pt));
+		pt.timeout = i;
+		pt.seconds = (int)tm[i];
+		if (ioctl(c->fd, DIOCSETTIMEOUT, &pt) == -1)
+			loadfail(c, "DIOCSETTIMEOUT: %s", strerror(errno));
+	}
+}
+
+/* The options of a main ruleset, which pfctl sets before it commits. */
+static void
+setoptions(struct loadctx *c, int idx)
+{
+	lua_State *L = c->L;
+	unsigned int limits[PF_LIMIT_MAX];
+	const char *s;
+	int t;
+
+	lua_getfield(L, idx, "options");
+	if (!lua_istable(L, -1)) {
+		lua_pop(L, 1);
+		return;
+	}
+	t = lua_gettop(L);
+	snprintf(c->where, sizeof(c->where), "options");
+
+	setlimits(c, t, limits);
+	settimeouts(c, t, limits[PF_LIMIT_STATES]);
+
+	s = optstring(L, t, "loginterface");
+	if (s != NULL) {
+		struct pfioc_iface pi;
+
+		memset(&pi, 0, sizeof(pi));
+		if (strcmp(s, "none") != 0)
+			copyname(c, pi.pfiio_name, sizeof(pi.pfiio_name), s,
+			         "interface name");
+		if (ioctl(c->fd, DIOCSETSTATUSIF, &pi) == -1)
+			loadfail(c, "DIOCSETSTATUSIF: %s", strerror(errno));
+	}
+
+	lua_getfield(L, t, "reassemble");
+	if (lua_isboolean(L, -1)) {
+		uint32_t reass = lua_toboolean(L, -1) ? PF_REASS_ENABLED : 0;
+
+		if (ioctl(c->fd, DIOCSETREASS, &reass) == -1)
+			loadfail(c, "DIOCSETREASS: %s", strerror(errno));
+	}
+	lua_pop(L, 2);
+	c->where[0] = '\0';
+}
+
 /* Each entry of the list at field k of the table at idx, through fn. */
 static void
 eachentry(struct loadctx *c, int idx, const char *k,
@@ -734,9 +929,10 @@ Load rulesets in one transaction, the way pfctl -f does.
 
 pf.dsl builds the argument: rulesets is a list of { anchor, rules,
 tables }, where each rule is already expanded and carries pfctl's
-defaults. The first ruleset that names the main ruleset may also bring
-statelimiters, sourcelimiters and skip. Any failure rolls the whole
-transaction back.
+defaults. A main ruleset may also bring statelimiters, sourcelimiters,
+skip and options { limits, timeouts, loginterface, reassemble }. With
+check set, everything is sent and then rolled back. Any failure rolls
+the whole transaction back.
 @function pf:load
 @tparam table spec
 @treturn boolean true
@@ -821,7 +1017,15 @@ pfload(lua_State *L)
 		lua_pop(L, 1);
 	}
 
+	/* A check stops here: everything was accepted, and nothing stays. */
+	if (optbool(L, 2, "check")) {
+		(void)ioctl(c.fd, DIOCXROLLBACK, &c.trans);
+		lua_pushboolean(L, 1);
+		return 1;
+	}
+
 	setskip(&c, 2);
+	setoptions(&c, 2);
 
 	if (ioctl(c.fd, DIOCXCOMMIT, &c.trans) == -1)
 		return loadfail(&c, "DIOCXCOMMIT: %s", strerror(errno));
