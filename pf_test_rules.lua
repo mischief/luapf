@@ -38,7 +38,7 @@ local properties = {
 	"max_pkt_rate", "max_pkt_rate_seconds", "pkt_rate_count",
 	"pkt_rate_last", "created_uid", "created_pid", "expires",
 	"state_limiter", "state_limiter_action", "source_limiter",
-	"source_limiter_action",
+	"source_limiter_action", "spec",
 }
 
 -- Every state-keeping mode rule.c can name, and every divert and return
@@ -411,7 +411,9 @@ local function checkrule(r, anchor)
 		assert(type(k) == "string")
 		assert(not seen[k], "duplicate key from pairs: " .. k)
 		seen[k] = true
-		assert(v == r[k], "pairs disagrees with index on " .. k)
+		-- spec builds a new table on each read.
+		assert(v == r[k] or (type(v) == "table" and
+		    type(r[k]) == "table"), "pairs disagrees with index on " .. k)
 	end
 	for _, k in ipairs(properties) do
 		assert(seen[k], "pairs never yielded " .. k)

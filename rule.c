@@ -2154,6 +2154,263 @@ rule_states_total(lua_State *L, int idx)
 	return 1;
 }
 
+/*
+ * rule.spec: the parts of a rule that the flat properties do not give as
+ * data. pf.dsl reads a rule back into Lua from this table.
+ */
+
+static void
+setint(lua_State *L, const char *k, lua_Integer v)
+{
+	lua_pushinteger(L, v);
+	lua_setfield(L, -2, k);
+}
+
+static void
+setbool(lua_State *L, const char *k, bool v)
+{
+	if (!v)
+		return;
+	lua_pushboolean(L, 1);
+	lua_setfield(L, -2, k);
+}
+
+static void
+setname(lua_State *L, const char *k, const char *name, size_t size)
+{
+	pushbounded(L, name, size);
+	lua_setfield(L, -2, k);
+}
+
+static void
+setaddr(lua_State *L, const char *k, sa_family_t af, const struct pf_addr *a)
+{
+	char s[INET6_ADDRSTRLEN];
+
+	if (inet_ntop(af == AF_INET6 ? AF_INET6 : AF_INET, a, s, sizeof(s)) ==
+	    NULL)
+		luaL_error(L, "inet_ntop: %s", strerror(errno));
+	lua_pushstring(L, s);
+	lua_setfield(L, -2, k);
+}
+
+/* Push an address as { type = ..., ... }. */
+static void
+pushaddrspec(lua_State *L, const struct pf_addr_wrap *aw, sa_family_t af)
+{
+	lua_newtable(L);
+
+	switch (aw->type) {
+	case PF_ADDR_DYNIFTL:
+		lua_pushstring(L, "dyn");
+		lua_setfield(L, -2, "type");
+		setname(L, "name", aw->v.ifname, sizeof(aw->v.ifname));
+		setbool(L, "network", aw->iflags & PFI_AFLAG_NETWORK);
+		setbool(L, "broadcast", aw->iflags & PFI_AFLAG_BROADCAST);
+		setbool(L, "peer", aw->iflags & PFI_AFLAG_PEER);
+		setbool(L, "first", aw->iflags & PFI_AFLAG_NOALIAS);
+		return;
+	case PF_ADDR_TABLE:
+		lua_pushstring(L, "table");
+		lua_setfield(L, -2, "type");
+		setname(L, "name", aw->v.tblname, sizeof(aw->v.tblname));
+		return;
+	case PF_ADDR_NOROUTE:
+		lua_pushstring(L, "no-route");
+		lua_setfield(L, -2, "type");
+		return;
+	case PF_ADDR_URPFFAILED:
+		lua_pushstring(L, "urpf-failed");
+		lua_setfield(L, -2, "type");
+		return;
+	case PF_ADDR_RTLABEL:
+		lua_pushstring(L, "route");
+		lua_setfield(L, -2, "type");
+		setname(L, "name", aw->v.rtlabelname, sizeof(aw->v.rtlabelname));
+		return;
+	case PF_ADDR_RANGE:
+		lua_pushstring(L, "range");
+		lua_setfield(L, -2, "type");
+		setaddr(L, "from", af, &aw->v.a.addr);
+		setaddr(L, "to", af, &aw->v.a.mask);
+		return;
+	case PF_ADDR_ADDRMASK:
+		break;
+	default:
+		lua_pushstring(L, "unknown");
+		lua_setfield(L, -2, "type");
+		return;
+	}
+
+	if (addriszero(&aw->v.a.addr) && addriszero(&aw->v.a.mask)) {
+		lua_pushstring(L, "any");
+		lua_setfield(L, -2, "type");
+		return;
+	}
+
+	lua_pushstring(L, "addr");
+	lua_setfield(L, -2, "type");
+	setaddr(L, "addr", af, &aw->v.a.addr);
+	setint(L, "bits", maskbits(&aw->v.a.mask));
+}
+
+static void
+pushportspec(lua_State *L, uint8_t op, uint16_t lo, uint16_t hi)
+{
+	lua_newtable(L);
+	lua_pushstring(L, opname(op));
+	lua_setfield(L, -2, "op");
+	setint(L, "lo", lo);
+	setint(L, "hi", hi);
+}
+
+static void
+setruleaddr(lua_State *L, const char *k, const struct pf_rule_addr *ra,
+            sa_family_t af)
+{
+	pushaddrspec(L, &ra->addr, af);
+	setbool(L, "neg", ra->neg);
+	if (opname(ra->port_op) != NULL) {
+		pushportspec(L, ra->port_op, ntohs(ra->port[0]),
+		             ntohs(ra->port[1]));
+		lua_setfield(L, -2, "port");
+	}
+	lua_setfield(L, -2, k);
+}
+
+static void
+setpool(lua_State *L, const char *k, const struct pf_pool *p,
+        enum poolkind kind, sa_family_t af)
+{
+	const char *type = pooltypename(p->opts);
+
+	pushaddrspec(L, &p->addr, af);
+	if (p->ifname[0] != '\0')
+		setname(L, "ifname", p->ifname, sizeof(p->ifname));
+	if (poolhasport(p, kind)) {
+		setint(L, "port_lo", p->proxy_port[0]);
+		setint(L, "port_hi", p->proxy_port[1] != 0 ? p->proxy_port[1]
+		                                           : p->proxy_port[0]);
+	}
+	if (type != NULL) {
+		lua_pushstring(L, type);
+		lua_setfield(L, -2, "method");
+	}
+	setbool(L, "sticky", p->opts & PF_POOL_STICKYADDR);
+	setbool(L, "static_port", poolisstaticport(p, kind));
+	lua_setfield(L, -2, k);
+}
+
+static int
+rule_spec(lua_State *L, int idx)
+{
+	struct luapfrule *r = luaL_checkudata(L, idx, PFRULE_MT);
+	const struct pf_rule *rule = &r->rule;
+
+	lua_newtable(L);
+
+	if (rule->log) {
+		lua_newtable(L);
+		setbool(L, "all", rule->log & PF_LOG_ALL);
+		setbool(L, "matches", rule->log & PF_LOG_MATCHES);
+		setbool(L, "user", rule->log & PF_LOG_USER);
+		if (rule->logif != 0)
+			setint(L, "to", rule->logif);
+		lua_setfield(L, -2, "log");
+	}
+
+	if (rule->rcv_ifname[0] != '\0') {
+		lua_newtable(L);
+		setname(L, "name", rule->rcv_ifname, sizeof(rule->rcv_ifname));
+		setbool(L, "neg", rule->rcvifnot);
+		lua_setfield(L, -2, "received_on");
+	}
+
+	setruleaddr(L, "from", &rule->src, rule->af);
+	setruleaddr(L, "to", &rule->dst, rule->af);
+
+	if (rule->type != 0)
+		setint(L, "icmp_type", rule->type - 1);
+	if (rule->code != 0)
+		setint(L, "icmp_code", rule->code - 1);
+
+	lua_newtable(L);
+	setint(L, "keep", rule->keep_state);
+	if (rule->max_states != 0)
+		setint(L, "max", rule->max_states);
+	if (rule->max_src_states != 0)
+		setint(L, "max_src_states", rule->max_src_states);
+	if (rule->max_src_nodes != 0)
+		setint(L, "max_src_nodes", rule->max_src_nodes);
+	if (rule->max_src_conn != 0)
+		setint(L, "max_src_conn", rule->max_src_conn);
+	if (rule->max_src_conn_rate.limit != 0) {
+		lua_newtable(L);
+		setint(L, "limit", rule->max_src_conn_rate.limit);
+		setint(L, "seconds", rule->max_src_conn_rate.seconds);
+		lua_setfield(L, -2, "max_src_conn_rate");
+	}
+	if (rule->overload_tblname[0] != '\0') {
+		setname(L, "overload", rule->overload_tblname,
+		        sizeof(rule->overload_tblname));
+		if (rule->flush & PF_FLUSH_GLOBAL)
+			lua_pushstring(L, "global");
+		else
+			lua_pushboolean(L, rule->flush != 0);
+		lua_setfield(L, -2, "flush");
+	}
+	lua_newtable(L);
+	for (int i = 0; i < PFTM_MAX; i++)
+		if (rule->timeout[i] != 0 && timeoutnames[i] != NULL)
+			setint(L, timeoutnames[i], rule->timeout[i]);
+	lua_setfield(L, -2, "timeouts");
+	lua_setfield(L, -2, "state");
+
+	if (rule->scrub_flags & PFSTATE_SETPRIO) {
+		lua_newtable(L);
+		lua_pushinteger(L, rule->set_prio[0]);
+		lua_rawseti(L, -2, 1);
+		lua_pushinteger(L, rule->set_prio[1]);
+		lua_rawseti(L, -2, 2);
+		lua_setfield(L, -2, "prio");
+	}
+
+	if (rule->qname[0] != '\0') {
+		lua_newtable(L);
+		pushbounded(L, rule->qname, sizeof(rule->qname));
+		lua_rawseti(L, -2, 1);
+		if (rule->pqname[0] != '\0') {
+			pushbounded(L, rule->pqname, sizeof(rule->pqname));
+			lua_rawseti(L, -2, 2);
+		}
+		lua_setfield(L, -2, "queue");
+	}
+
+	if (poolisset(&rule->nat))
+		setpool(L, "nat", &rule->nat, POOL_NAT, poolaf(rule, POOL_NAT));
+	if (poolisset(&rule->rdr))
+		setpool(L, "rdr", &rule->rdr, POOL_RDR, rule->af);
+	if (routename(rule->rt) != NULL)
+		setpool(L, "route", &rule->route, POOL_ROUTE, rule->af);
+
+	if (rule->statelim.id != 0) {
+		lua_newtable(L);
+		setint(L, "id", rule->statelim.id);
+		lua_pushstring(L, limiteraction(rule->statelim.limiter_action));
+		lua_setfield(L, -2, "action");
+		lua_setfield(L, -2, "state_limiter");
+	}
+	if (rule->sourcelim.id != 0) {
+		lua_newtable(L);
+		setint(L, "id", rule->sourcelim.id);
+		lua_pushstring(L, limiteraction(rule->sourcelim.limiter_action));
+		lua_setfield(L, -2, "action");
+		lua_setfield(L, -2, "source_limiter");
+	}
+
+	return 1;
+}
+
 static const struct ro_property rule_properties[] = {
     {"nr",                    rule_nr                   },
     {"action",                rule_action               },
@@ -2235,6 +2492,7 @@ static const struct ro_property rule_properties[] = {
     {"state_limiter_action",  rule_state_limiter_action },
     {"source_limiter",        rule_source_limiter       },
     {"source_limiter_action", rule_source_limiter_action},
+    {"spec",                  rule_spec                 },
     {NULL,                    NULL                      },
 };
 
@@ -2573,8 +2831,13 @@ match_tag, match_tag_not, os_fingerprint, anchor_relative,
 anchor_wildcard, divert, divert_address, divert_port, source_addresses,
 destination_addresses, src_nodes, max_pkt_rate, max_pkt_rate_seconds,
 pkt_rate_count, pkt_rate_last, created_uid, created_pid, expires,
-state_limiter, state_limiter_action, source_limiter and
-source_limiter_action.
+state_limiter, state_limiter_action, source_limiter,
+source_limiter_action and spec.
+
+spec is a table of what the rule says, as data rather than text: log,
+received_on, from and to (each with type, neg and port), icmp_type,
+icmp_code, state, prio, queue, the nat, rdr and route pools, and the two
+limiters by id.
 
 Source and destination render the way pfctl prints them, tables as
 &lt;name&gt; and interfaces as (name). interface_not says the rule matches
