@@ -101,6 +101,8 @@ lua_pf = shared_library('pf',
   gnu_symbol_visibility: 'hidden',
 )
 
+install_data('pf/dsl.lua', install_dir: install_mod / 'pf')
+
 ldoc_bin = find_program('ldoc', required: false)
 if ldoc_bin.found()
   documentation = custom_target('ldoc',
@@ -172,6 +174,9 @@ lua_host_env = environment()
 lua_host_env.prepend('LUA_CPATH', meson.current_build_dir() / '?.so',
   separator: ';')
 lua_host_env.append('LUA_CPATH', ';', separator: ';')
+lua_host_env.prepend('LUA_PATH', meson.current_source_dir() / '?.lua',
+  separator: ';')
+lua_host_env.append('LUA_PATH', ';', separator: ';')
 meson.add_devenv(lua_host_env)
 add_test_setup('default', is_default: true, env: lua_host_env)
 
@@ -196,6 +201,13 @@ foreach t : pf_tests
   )
 endforeach
 
+
+# Suite 'dsl': pf.dsl renders text and needs neither pf nor doas.
+test('pf_test_dsl_render.lua',
+  lua_bin,
+  args: [files('pf_test_dsl_render.lua')],
+  suite: 'dsl',
+)
 
 if get_option('fuzz')
   subdir('fuzz')
