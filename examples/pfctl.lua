@@ -101,7 +101,41 @@ end
 
 local show = {}
 
+-- Limiters belong to the main ruleset, and pfctl prints them before its
+-- rules: state limiters, then source limiters, each in id order.
+local function limiters()
+	local function rate(l)
+		if l.rate.limit == 0 then
+			return ""
+		end
+		return string.format(" rate %d/%d", l.rate.limit, l.rate.seconds)
+	end
+	for _, l in ipairs(h:statelimiters()) do
+		print(string.format('state limiter "%s" id %d limit %d%s',
+		    l.name, l.id, l.limit, rate(l)))
+	end
+	for _, l in ipairs(h:sourcelimiters()) do
+		local s = string.format(
+		    'source limiter "%s" id %d entries %d limit %d%s',
+		    l.name, l.id, l.entries, l.limit, rate(l))
+		if l.overload then
+			s = s .. string.format(" table <%s> above %d below %d",
+			    l.overload.table, l.overload.hwm, l.overload.lwm)
+		end
+		if l.inet_prefix ~= 32 then
+			s = s .. " inet mask " .. l.inet_prefix
+		end
+		if l.inet6_prefix ~= 128 then
+			s = s .. " inet6 mask " .. l.inet6_prefix
+		end
+		print(s)
+	end
+end
+
 function show.rules()
+	if opt.anchor == "" then
+		limiters()
+	end
 	for _, r in ipairs(h:rules(opt.anchor)) do
 		print(tostring(r))
 		if opt.verbose > 0 then

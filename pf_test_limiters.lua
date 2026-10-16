@@ -170,7 +170,7 @@ source limiter "scan" id 7 entries 10000 limit 1000 rate 100/10 \
 	table <flooders> above 900 below 100
 
 pass in on lo0 label "inbound" state limiter "dns"
-pass out on lo0 label "outbound" source limiter "scan"
+pass out on lo0 label "outbound" source limiter "scan" (no-match)
 ]])
 f:close()
 local loaded = sh("pfctl -f /tmp/pf_test_limiters.conf")
@@ -300,6 +300,31 @@ for _, flags in ipairs({ "", "-v" }) do
 	local mine = sh("lua54 examples/pfctl.lua " .. flags .. " -s labels")
 	local theirs = sh("pfctl " .. flags .. " -s labels")
 	assert(mine == theirs, "pfctl.lua " .. flags .. " -s labels differs:\n" ..
+	    "--- pfctl\n" .. theirs .. "--- pfctl.lua\n" .. mine)
+end
+
+-- Each rule names its limiter and what happens when the limiter is full.
+local bylabel = {}
+for _, r in ipairs(h:rules()) do
+	bylabel[r.label or ""] = r
+end
+local inbound, outbound = bylabel.inbound, bylabel.outbound
+assert(inbound.state_limiter == "dns", "inbound state_limiter is " ..
+    tostring(inbound.state_limiter))
+assert(inbound.state_limiter_action == "block")
+assert(inbound.source_limiter == nil and
+    inbound.source_limiter_action == nil)
+assert(outbound.source_limiter == "scan", "outbound source_limiter is " ..
+    tostring(outbound.source_limiter))
+assert(outbound.source_limiter_action == "no-match")
+assert(outbound.state_limiter == nil and
+    outbound.state_limiter_action == nil)
+
+-- -s rules prints the limiters, then the rules that use them.
+for _, flags in ipairs({ "", "-v" }) do
+	local mine = sh("lua54 examples/pfctl.lua " .. flags .. " -s rules")
+	local theirs = sh("pfctl " .. flags .. " -s rules")
+	assert(mine == theirs, "pfctl.lua " .. flags .. " -s rules differs:\n" ..
 	    "--- pfctl\n" .. theirs .. "--- pfctl.lua\n" .. mine)
 end
 
