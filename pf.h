@@ -37,8 +37,17 @@ int pfsources(lua_State *L);
 /* queue.c */
 int pfqueues(lua_State *L);
 
+/* load.c */
+int pfload(lua_State *L);
+int pfprotonumber(lua_State *L);
+int pfservicenumber(lua_State *L);
+int pficmptype(lua_State *L);
+int pfuidnumber(lua_State *L);
+
 /* rule.c */
 int pfrules(lua_State *L);
+int luapf_timeout_index(const char *name);
+int luapf_icmp_type(const char *name, int af);
 
 /* system.c */
 int pflimits(lua_State *L);

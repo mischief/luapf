@@ -89,7 +89,7 @@ lua_dep = dependency(dep_name)
 
 lua_pf_srcs = '''
 pf.c state.c queue.c table.c rule.c anchor.c system.c privsep.c
-limiter.c
+limiter.c load.c
 '''.split()
 
 lua_pf = shared_library('pf',

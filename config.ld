@@ -5,4 +5,4 @@ format = "markdown"
 
 -- every source contributes to the same pf module
 merge = true
-file = { "pf.c", "state.c", "queue.c", "table.c", "rule.c", "anchor.c", "system.c", "privsep.c" }
+file = { "pf.c", "state.c", "queue.c", "table.c", "rule.c", "anchor.c", "system.c", "privsep.c", "load.c", "limiter.c", "pf/dsl.lua" }

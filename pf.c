@@ -425,6 +425,7 @@ static const luaL_Reg pfmethods[] = {
     {"queues",         pfqueues        },
 
     {"rules",          pfrules         },
+    {"load",           pfload          },
     {"anchors",        pfanchors       },
 
     {"interfaces",     pfinterfaces    },
@@ -540,9 +541,13 @@ pfopenfd(lua_State *L)
 }
 
 static const luaL_Reg pflib[] = {
-    {"open",   pfopen  },
-    {"openfd", pfopenfd},
-    {NULL,     NULL    },
+    {"open",          pfopen         },
+    {"openfd",        pfopenfd       },
+    {"protonumber",   pfprotonumber  },
+    {"servicenumber", pfservicenumber},
+    {"icmptype",      pficmptype     },
+    {"uidnumber",     pfuidnumber    },
+    {NULL,            NULL           },
 };
 
 LUAPF_EXPORT int

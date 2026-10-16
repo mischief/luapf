@@ -345,6 +345,21 @@ static const struct icmpname icmp6names[] = {
     {201, "wrurep"    },
 };
 
+/* The number of an ICMP type name in af, or -1. */
+int
+luapf_icmp_type(const char *name, int af)
+{
+	const struct icmpname *t = af == AF_INET6 ? icmp6names : icmp4names;
+	size_t n = af == AF_INET6 ? sizeof(icmp6names) / sizeof(icmp6names[0])
+	                          : sizeof(icmp4names) / sizeof(icmp4names[0]);
+
+	for (size_t i = 0; i < n; i++)
+		if (strcmp(t[i].name, name) == 0)
+			return t[i].type;
+
+	return -1;
+}
+
 static const char *
 icmpname(uint8_t type, sa_family_t af)
 {
@@ -548,6 +563,17 @@ static const char *const timeoutnames[PFTM_MAX] = {
     "interval",     "adaptive.start", "adaptive.end",
     "src.track",    "ts.diff",
 };
+
+/* The index of a state timeout name, or -1. */
+int
+luapf_timeout_index(const char *name)
+{
+	for (int i = 0; i < PFTM_MAX; i++)
+		if (timeoutnames[i] != NULL && strcmp(timeoutnames[i], name) == 0)
+			return i;
+
+	return -1;
+}
 
 static bool
 hastimeouts(const struct pf_rule *rule)
