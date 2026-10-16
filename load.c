@@ -1165,7 +1165,8 @@ pfuidnumber(lua_State *L)
 	struct passwd *pw;
 
 	if (strcmp(name, "unknown") == 0) {
-		lua_pushinteger(L, (lua_Integer)UID_MAX);
+		/* pfctl stores "unknown" as -1. */
+		lua_pushinteger(L, (lua_Integer)(uid_t)-1);
 		return 1;
 	}
 	pw = getpwnam(name);
