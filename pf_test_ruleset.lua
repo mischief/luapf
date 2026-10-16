@@ -82,6 +82,15 @@ pass out on vether0 proto tcp to <hosts> port 22 received-on vether0 nat-to veth
 pass out on pair0 proto { tcp, udp } from any to any port 4001 set queue bulk keep state
 pass in on pair0 proto tcp from any to any port 22 keep state (max-src-conn-rate 1/60, overload <overloaded> flush global)
 pass in on pair0 inet proto tcp from 10.10.0.0/24 to any port { 80, 443 } rdr-to 10.10.0.1 port 8080
+pass out log on pair0 route-to 10.10.0.2
+pass in log on pair0 reply-to { 10.10.0.2, 10.10.0.3 } random
+pass in log on pair0 inet af-to inet6 from 2001:db8:9::1 to 64:ff9b::/96
+pass in log on pair0 inet6 af-to inet from 10.10.0.1
+pass in log proto tcp to port 8081 divert-to 127.0.0.1 port 8080
+pass out log proto tcp divert-reply
+pass in log proto udp divert-packet port 700
+match out log on pair0 nat-to 10.10.0.9 static-port
+pass log on pair0 from 10.10.0.5 binat-to 192.168.77.5
 anchor "services"
 ]])
 conf:close()

@@ -1089,7 +1089,7 @@ rulepool(const struct pf_rule *rule, enum poolkind *kind, const char **keyword)
 static sa_family_t
 poolaf(const struct pf_rule *rule, enum poolkind kind)
 {
-	if (kind == POOL_NAT && rule->naf != 0)
+	if (kind != POOL_ROUTE && rule->naf != 0)
 		return rule->naf;
 
 	return rule->af;
@@ -1172,15 +1172,24 @@ addpool(lua_State *L, luaL_Buffer *b, const struct pf_pool *p,
 static void
 addtranslation(lua_State *L, luaL_Buffer *b, const struct pf_rule *rule)
 {
-	if (poolisset(&rule->nat)) {
-		luaL_addstring(b, (rule->rule_flag & PFRULE_AFTO) ? " af-to "
-		                                                  : " nat-to ");
+	/* af-to keeps its source pool in nat and its destination in rdr. */
+	if (rule->rule_flag & PFRULE_AFTO) {
+		luaL_addstring(b, rule->naf == AF_INET6 ? " af-to inet6 from "
+		                                        : " af-to inet from ");
 		addpool(L, b, &rule->nat, POOL_NAT, poolaf(rule, POOL_NAT));
-	}
-
-	if (poolisset(&rule->rdr)) {
-		luaL_addstring(b, " rdr-to ");
-		addpool(L, b, &rule->rdr, POOL_RDR, rule->af);
+		if (poolisset(&rule->rdr)) {
+			luaL_addstring(b, " to ");
+			addpool(L, b, &rule->rdr, POOL_RDR, poolaf(rule, POOL_RDR));
+		}
+	} else {
+		if (poolisset(&rule->nat)) {
+			luaL_addstring(b, " nat-to ");
+			addpool(L, b, &rule->nat, POOL_NAT, poolaf(rule, POOL_NAT));
+		}
+		if (poolisset(&rule->rdr)) {
+			luaL_addstring(b, " rdr-to ");
+			addpool(L, b, &rule->rdr, POOL_RDR, rule->af);
+		}
 	}
 
 	if (routename(rule->rt) != NULL) {
@@ -2415,9 +2424,16 @@ rule_spec(lua_State *L, int idx)
 	if (poolisset(&rule->nat))
 		setpool(L, "nat", &rule->nat, POOL_NAT, poolaf(rule, POOL_NAT));
 	if (poolisset(&rule->rdr))
-		setpool(L, "rdr", &rule->rdr, POOL_RDR, rule->af);
-	if (routename(rule->rt) != NULL)
+		setpool(L, "rdr", &rule->rdr, POOL_RDR, poolaf(rule, POOL_RDR));
+	if (routename(rule->rt) != NULL) {
 		setpool(L, "route", &rule->route, POOL_ROUTE, rule->af);
+		lua_pushstring(L, routename(rule->rt));
+		lua_setfield(L, -2, "rt");
+	}
+	if (rule->naf == AF_INET || rule->naf == AF_INET6) {
+		lua_pushstring(L, rule->naf == AF_INET ? "inet" : "inet6");
+		lua_setfield(L, -2, "naf");
+	}
 
 	if (rule->statelim.id != 0) {
 		lua_newtable(L);
@@ -2862,8 +2878,8 @@ source_limiter_action and spec.
 
 spec is a table of what the rule says, as data rather than text: log,
 received_on, from and to (each with type, neg and port), icmp_type,
-icmp_code, state, prio, queue, the nat, rdr and route pools, and the two
-limiters by id.
+icmp_code, state, prio, queue, the nat, rdr and route pools, rt (the
+route keyword), naf (the af-to family), and the two limiters by id.
 
 Source and destination render the way pfctl prints them, tables as
 &lt;name&gt; and interfaces as (name). interface_not says the rule matches
