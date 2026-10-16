@@ -359,6 +359,39 @@ encodelimiter(struct loadctx *c, int idx, const char *k, uint8_t *id,
 	lua_pop(L, 1);
 }
 
+static void
+encodedivert(struct loadctx *c, int idx, struct pf_rule *r)
+{
+	lua_State *L = c->L;
+	const char *type;
+	int t;
+
+	lua_getfield(L, idx, "divert");
+	if (!lua_istable(L, -1)) {
+		lua_pop(L, 1);
+		return;
+	}
+	t = lua_gettop(L);
+	type = optstring(L, t, "type");
+	if (type != NULL && strcmp(type, "to") == 0) {
+		const char *a = optstring(L, t, "addr");
+		sa_family_t af = afnum(optstring(L, t, "af"));
+
+		r->divert.type = PF_DIVERT_TO;
+		if (a == NULL || af == 0 ||
+		    inet_pton(af, a, &r->divert.addr) != 1)
+			loadfail(c, "bad divert address %s", a ? a : "(none)");
+	} else if (type != NULL && strcmp(type, "reply") == 0) {
+		r->divert.type = PF_DIVERT_REPLY;
+	} else if (type != NULL && strcmp(type, "packet") == 0) {
+		r->divert.type = PF_DIVERT_PACKET;
+	} else {
+		loadfail(c, "unknown divert %s", type ? type : "(none)");
+	}
+	r->divert.port = htons((uint16_t)optint(L, t, "port", 0));
+	lua_pop(L, 1);
+}
+
 /* One rule table, already expanded, into the kernel's rule. */
 static void
 encoderule(struct loadctx *c, int idx, struct pf_rule *r)
@@ -501,8 +534,28 @@ encoderule(struct loadctx *c, int idx, struct pf_rule *r)
 	}
 	lua_pop(L, 1);
 
-	encodepool(c, idx, "nat", &r->nat, r->af);
-	encodepool(c, idx, "rdr", &r->rdr, r->af);
+	r->naf = afnum(optstring(L, idx, "naf"));
+	if (optbool(L, idx, "af_to"))
+		r->rule_flag |= PFRULE_AFTO;
+	encodepool(c, idx, "nat", &r->nat, r->naf != 0 ? r->naf : r->af);
+	encodepool(c, idx, "rdr", &r->rdr, r->naf != 0 ? r->naf : r->af);
+
+	s = optstring(L, idx, "rt");
+	if (s != NULL) {
+		if (strcmp(s, "route-to") == 0)
+			r->rt = PF_ROUTETO;
+		else if (strcmp(s, "reply-to") == 0)
+			r->rt = PF_REPLYTO;
+		else if (strcmp(s, "dup-to") == 0)
+			r->rt = PF_DUPTO;
+		else
+			loadfail(c, "unknown route %s", s);
+		encodepool(c, idx, "route", &r->route, r->af);
+	}
+
+	encodedivert(c, idx, r);
+	if (optbool(L, idx, "scrub_tcp"))
+		r->scrub_flags |= PFSTATE_SCRUB_TCP;
 
 	encodelimiter(c, idx, "state_limiter", &r->statelim.id,
 	              &r->statelim.limiter_action);
