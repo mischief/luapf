@@ -74,10 +74,13 @@ endforeach
 install_cmod = get_option('prefix') / 'lib/lua/' + which_lua.replace('lua', '')
 install_mod = get_option('prefix') / 'share/lua/' + which_lua.replace('lua', '')
 
-
 cmod_override = get_option('lua-module-directory')
 if cmod_override != ''
   install_cmod = cmod_override
+endif
+mod_override = get_option('lua-source-directory')
+if mod_override != ''
+  install_mod = mod_override
 endif
 
 dep_name = which_lua
