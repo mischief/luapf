@@ -63,6 +63,15 @@ same(function(rs) rs:pass{ proto = "icmp", icmp_type = "echoreq" } end,
 
 -- State, tags and the set actions.
 same(function(rs) rs:pass{ state = false } end, "pass no state\n")
+same(function(rs) rs:pass{ dir = "out", quick = true, on = dsl.iface("lo1"), proto = "udp",
+    to = "127.0.0.2", port = 2055, user = "root", state = false } end,
+    "pass out quick on lo1 proto udp from any to 127.0.0.2 port 2055 user root no state\n")
+same(function(rs) rs:block{ proto = "tcp", user = 1000 } end, "block proto tcp user 1000\n")
+same(function(rs) rs:pass{ proto = { "tcp", "udp" }, user = "unknown" } end,
+    "pass proto { tcp, udp } user unknown\n")
+refuses(function(rs) rs:pass{ user = "root" } end, "user needs proto tcp or udp")
+refuses(function(rs) rs:pass{ proto = "icmp", user = "root" } end, "user needs proto tcp or udp")
+refuses(function(rs) rs:pass{ proto = "tcp", user = "a b" } end, "bad user")
 same(function(rs) rs:pass{ proto = "tcp", state = { kind = "modulate",
     source_track = "rule", max_src_nodes = 10, if_bound = true } } end,
     "pass proto tcp modulate state (max-src-nodes 10, source-track rule, " ..

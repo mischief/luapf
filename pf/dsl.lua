@@ -822,6 +822,7 @@ local ruleopts = {
 	icmp6_type = FILTER, state = { pass = true }, label = FILTER,
 	state_limiter = { pass = true }, source_limiter = { pass = true },
 	tag = TRANSLATE, tagged = ALL, received_on = ALL, prio = TRANSLATE,
+	user = FILTER,
 	queue = TRANSLATE, rtable = TRANSLATE, once = FILTER,
 	allow_opts = { pass = true }, nat_to = TRANSLATE,
 	rdr_to = TRANSLATE, binat_to = TRANSLATE,
@@ -949,6 +950,23 @@ local function rule(action, opts, sites)
 		if opts.port ~= nil then
 			w[#w + 1] = "port " .. port(opts.port, sites, action .. ": port")
 		end
+	end
+	if opts.user ~= nil then
+		-- pf matches the owner of a socket, so only tcp and udp.
+		local u = opts.user
+		if not names or #names == 0 then
+			fail(sites, "%s: user needs proto tcp or udp", action)
+		end
+		for _, n in ipairs(names) do
+			if n ~= "tcp" and n ~= "udp" then
+				fail(sites, "%s: user needs proto tcp or udp", action)
+			end
+		end
+		if not (isint(u, 0, 0xfffffffe) or
+		    (type(u) == "string" and u:match("^[%a_][%w_.%-]*$"))) then
+			fail(sites, "%s: bad user %s", action, tostring(u))
+		end
+		w[#w + 1] = "user " .. u
 	end
 	if opts.flags ~= nil then
 		if opts.flags ~= "any" and
