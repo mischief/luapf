@@ -135,21 +135,14 @@ pushcounters(lua_State *L, const char *field, const char *const *names,
 /***
 Read the global status.
 
-The result holds running, since, states, states_halfopen, src_nodes,
-fragments, debug, hostid, reass, syncookies_active, syncookies_mode,
-ifname and checksum, plus the syncookies_inflight pair, the
-syncookies_watermarks table and the counters, lcounters, fcounters,
-scounters, ncounters, bcounters and pcounters tables.
+Fields: running, since, states, states_halfopen, src_nodes, fragments,
+debug, hostid, reass, syncookies_active, syncookies_mode, ifname,
+checksum, syncookies_inflight, syncookies_watermarks (start and end),
+and the counter tables counters (by drop reason), lcounters (by limit),
+bcounters and pcounters. fcounters, scounters and ncounters hold
+searches, inserts and removals for states, source nodes and fragments.
 
-counters is keyed by drop reason, lcounters by limit, and fcounters,
-scounters and ncounters each hold searches, inserts and removals for the
-state table, the source node table and the fragment cache.
-
-since is not a wall clock time: it counts from when the machine booted,
-the way pfctl reads it to work out how long PF has been running. hostid
-is byte swapped into host order, so it reads as pfctl prints it.
-syncookies_watermarks holds the adaptive syncookie state counts pfctl
-prints as start and end.
+since counts from boot, not from the epoch. hostid is in host order.
 @function pf:status
 @treturn table status
 @raise if either ioctl fails

@@ -1,11 +1,7 @@
 /* SPDX-License-Identifier: ISC */
 /*
- * Feed synthetic kernel bytes to the rule rendering path.
- *
- * pf.so builds a rule userdata from whatever DIOCGETRULE returns and then
- * prints it. This harness plays the kernel: it drops fuzzer bytes into a
- * userdata carrying the rule metatable, then reads every property and
- * renders the rule. No /dev/pf and no privilege are needed.
+ * Fuzz the rule renderer: put fuzzer bytes in a rule userdata, then read
+ * every property and render it. This needs no /dev/pf.
  */
 #include <limits.h>
 #include <string.h>

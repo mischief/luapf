@@ -155,29 +155,9 @@ pushifcounters(lua_State *L, const struct pfi_kif *k)
 	}
 }
 
-/***
-Read the per-interface counters, the same numbers as pfctl -vvsI.
-
-Each entry holds name, skip, any, states, rules, routes, srcnodes, cleared
-and eight counter pairs named like in4_pass_packets and out6_block_bytes.
-skip and any are the two flags pf keeps per interface: skip is set by
-pfctl -F Interfaces or a set skip rule, any marks the group that matches
-every non-loopback interface. The filter matches an interface or a group,
-not a prefix.
-@function pf:interfaces
-@string[opt] filter interface or group name
-@treturn table array of interface tables
-@raise if the ioctl fails
-*/
 /*
- * These entries are lua tables rather than userdata, which is no barrier
- * to a metamethod: a table takes a metatable the same way. Each renders
- * what pfctl prints for it, so printing one is worth doing.
- */
-
-/*
- * A metamethod is reachable through getmetatable, so it can be called
- * with anything at all. Accept only a table this module gave this
+ * The entries here are Lua tables with a metatable, so a metamethod can
+ * be called with anything. Accept only a table this module gave this
  * metatable, the way luaL_checkudata does for userdata.
  */
 static void
@@ -292,6 +272,20 @@ setentrymeta(lua_State *L, const char *name, lua_CFunction f)
 	lua_setmetatable(L, -2);
 }
 
+/***
+Read the per-interface counters, the same numbers as pfctl -vvsI.
+
+Each entry holds name, skip, any, states, rules, routes, srcnodes, cleared
+and eight counter pairs named like in4_pass_packets and out6_block_bytes.
+skip and any are the two flags pf keeps per interface: skip is set by
+pfctl -F Interfaces or a set skip rule, any marks the group that matches
+every non-loopback interface. The filter matches an interface or a group,
+not a prefix.
+@function pf:interfaces
+@string[opt] filter interface or group name
+@treturn table array of interface tables
+@raise if the ioctl fails
+*/
 int
 pfinterfaces(lua_State *L)
 {

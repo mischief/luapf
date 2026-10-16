@@ -44,11 +44,9 @@ pushrate(lua_State *L, unsigned int limit, unsigned int seconds)
 }
 
 /*
- * The two GETN ioctls walk their trees the same way: ask for the first
- * limiter with an id at or above the one given, then ask again from one
- * past what came back. The kernel reports the end of the walk as ENOENT
- * for state limiters and ESRCH for source limiters, so accept either
- * rather than tie this to which one a release happens to return.
+ * The GETN walks ask for the first id at or above the one given. The end
+ * of a walk is ENOENT for state limiters and ESRCH for source limiters,
+ * so accept either.
  */
 static int
 walkdone(void)
@@ -59,19 +57,13 @@ walkdone(void)
 /***
 Read the state limiters, the same set pfctl -s Stlimiters prints.
 
-A state limiter caps the number of states, or the rate of state creation,
-for the rules that name it. Each entry holds id, name, limit, inuse,
-admitted, hardlimited and ratelimited, plus a rate table holding limit
-and seconds. A limiter configured with no rate reports both as zero,
-which is what pfctl prints as nil.
+Each entry holds id, name, limit and a rate table { limit, seconds },
+which is zero when the limiter has no rate. inuse is the states held
+now. admitted, hardlimited and ratelimited count the states let through,
+refused for limit and refused for rate. The kernel does not return the
+description.
 
-limit and rate are the configuration; inuse is a gauge of the states the
-limiter currently holds, and admitted, hardlimited and ratelimited count
-the states it let through, refused for the total limit and refused for
-the rate limit. The kernel does not return the description field, so
-there is none here.
-
-The list is ordered by id. A read-only handle answers this ioctl.
+The list is in id order. A read-only handle can read it.
 @function pf:statelimiters
 @treturn table array of limiter tables
 @raise if the ioctl fails
@@ -127,25 +119,15 @@ pfstatelimiters(lua_State *L)
 /***
 Read the source limiters, the same set pfctl -s Srclimiters prints.
 
-A source limiter caps the states, or the rate of state creation, for each
-source address the rules naming it match. Each entry holds id, name,
-entries, limit, nentries, inuse, addrallocs, addrnomem, admitted,
-addrlimited, hardlimited, ratelimited, inet_prefix and inet6_prefix, plus
-a rate table holding limit and seconds.
+Configuration: id, name, entries (the cap on tracked addresses), limit
+(states per address), a rate table { limit, seconds }, and inet_prefix
+and inet6_prefix (pf.conf inet mask and inet6 mask). overload, when set,
+is { table, hwm, lwm }: pf.conf table, above and below.
 
-entries is the configured cap on tracked source addresses and nentries
-the gauge of how many exist; limit is the per-address state cap and inuse
-the states held across every address. addrlimited counts the states
-refused for the entries cap, hardlimited those refused for limit, and
-ratelimited those refused for the rate. inet_prefix and inet6_prefix are
-the prefix lengths source addresses are masked to, which pf.conf spells
-inet mask and inet6 mask.
-
-overload is set only where the limiter carries an overload table, and
-holds table, hwm and lwm -- pf.conf's table, above and below. The kernel
-does not return the description field, so there is none here.
-
-The list is ordered by id. A read-only handle answers this ioctl.
+Gauges: nentries, inuse. Counters: addrallocs, addrnomem, admitted,
+addrlimited (refused for entries), hardlimited (refused for limit) and
+ratelimited (refused for rate). The kernel does not return the
+description. The list is in id order; a read-only handle can read it.
 @function pf:sourcelimiters
 @treturn table array of limiter tables
 @raise if the ioctl fails

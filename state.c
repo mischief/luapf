@@ -161,10 +161,9 @@ state_expire(lua_State *L, int idx)
  */
 
 /*
- * Two ends by two views is four addresses, and an end is translated when
- * its two views differ. Three of the four describe a flow completely only
- * while one end is translated: nat-to with rdr-to gives WIRE
- * 10.99.0.9:53640 -> 10.99.0.3:7777 over STACK 10.99.0.1:3105 ->
+ * Two ends by two views give four addresses. An end is translated when
+ * its views differ. With nat-to and rdr-to together, all four differ:
+ * WIRE 10.99.0.9:53640 -> 10.99.0.3:7777, STACK 10.99.0.1:3105 ->
  * 10.99.0.2:9999.
  */
 static void
@@ -219,16 +218,9 @@ pushhostport(lua_State *L, sa_family_t af, const struct pf_addr *a,
 }
 
 /*
- * The key source and destination read, and with other set the one gateway
- * reads. Two states in different routing domains may carry the same
- * addresses and ports, so a key is only unique together with its rdomain.
- */
-/*
- * An af-to state translates between families, and the kernel mirrors the
- * two keys when it does: the end that is addr[1] in one key is addr[0] in
- * the other. pfctl inverts the same index and prints an inbound af-to
- * state with the outbound arrow, which is the same statement -- for
- * indexing, an inbound af-to state reads as an outbound one.
+ * An af-to state mirrors its two keys: addr[1] in one key is addr[0] in
+ * the other. So an inbound af-to state indexes like an outbound one, and
+ * pfctl prints it with the outbound arrow.
  */
 static int
 stateafto(const struct pfsync_state *s)
@@ -243,6 +235,11 @@ stateoutward(const struct pfsync_state *s)
 	return (int)s->direction == PF_OUT || stateafto(s);
 }
 
+/*
+ * The key source and destination read, and with other set the one gateway
+ * reads. Two states in different routing domains may carry the same
+ * addresses and ports, so a key is only unique together with its rdomain.
+ */
 static const struct pfsync_state_key *
 directionkey(const struct pfsync_state *s, int other)
 {
@@ -351,11 +348,9 @@ state_destination(lua_State *L, int idx)
 }
 
 /*
- * The same endpoint as the other side of translation sees it: whichever
- * key gimmekey() did not use. Outbound that is the source the stack asked
- * for before nat-to rewrote it; inbound, the destination the packet
- * carried before rdr-to redirected it. pfctl prints it in parentheses.
- * An untranslated state reports the address it already had.
+ * The same endpoint from the other side of translation, from the key
+ * gimmekey() did not use: the source before nat-to, or the destination
+ * before rdr-to. pfctl prints it in parentheses.
  */
 
 /*

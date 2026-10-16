@@ -2711,17 +2711,6 @@ static const luaL_Reg pfrulemeta[] = {
     {NULL,         NULL          },
 };
 
-/***
-Read the rules of an anchor.
-
-The kernel walks a transaction rather than serving rules by number, so the
-whole ruleset is read at once.
-@function pf:rules
-@string[opt=""] anchor
-@treturn table array of rule objects
-@raise if the anchor does not exist
-@usage for _, r in ipairs(h:rules()) do print(tostring(r)) end
-*/
 /* Fill in the names of the limiters a rule uses. A failed lookup leaves the
  * name empty, and the rule then shows the id. */
 static void
@@ -2747,6 +2736,17 @@ limitername(int fd, struct luapfrule *r)
 	}
 }
 
+/***
+Read the rules of an anchor.
+
+The kernel walks a transaction rather than serving rules by number, so the
+whole ruleset is read at once.
+@function pf:rules
+@string[opt=""] anchor
+@treturn table array of rule objects
+@raise if the anchor does not exist
+@usage for _, r in ipairs(h:rules()) do print(tostring(r)) end
+*/
 int
 pfrules(lua_State *L)
 {

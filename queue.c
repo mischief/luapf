@@ -47,11 +47,8 @@ pushcounters(lua_State *L, uint64_t qlength, uint64_t qlimit,
 }
 
 /*
- * Both arms are reported, but percent is always zero on this OpenBSD: the
- * parser refuses one ("no bandwidth in % yet"). There is no rate for it to
- * be a percentage of either -- PF is never told what a link can carry, so
- * a root queue's bandwidth is the operator asserting it, not a measurement,
- * and every child is relative to that assertion.
+ * Both arms are reported. percent is always zero: pfctl refuses a
+ * percentage, and pf does not know the link speed.
  */
 static void
 pushbwspec(lua_State *L, const struct pf_queue_bwspec *bw, const char *name)
@@ -95,43 +92,6 @@ pushfqspec(lua_State *L, const struct pf_queue_fqspec *fq)
 	lua_setfield(L, -2, "flowqueue");
 }
 
-/***
-Read every queue, its configuration and its statistics.
-
-Each entry holds these identity and configuration fields:
-
- - `name`, `parent`, `ifname`, `qid`, `parent_qid`
- - `scheduler`, the discipline that served the queue and produced the
-   statistics below, either `"hfsc"` or `"fqcodel"`
- - `flowqueue_class`, true when the ruleset asked for a flow queue with the
-   `flows` keyword. Only a flow queue without a parent is served by
-   fq-codel, so this is not the same thing as `scheduler`
- - `default_queue`, true for the queue that takes packets no other queue
-   matched, and `root_class`, true for the root of an HFSC tree
- - `flags`, the raw kernel flag word behind the two booleans above
- - `qlimit`, the packet limit the ruleset asked for
- - `linkshare` (pf.conf `bandwidth`), `realtime` (`min`) and `upperlimit`
-   (`max`), each a service curve `{ m1 = { absolute, percent },
-   m2 = { absolute, percent }, d }`. `m1` and `d` carry `burst X for Nms`.
-   `percent` is always zero: pf.conf takes no percentage today, and PF is
-   never told what a link carries, so a rate is whatever the ruleset said
- - `flowqueue`, the flow queue parameters `{ flows, quantum, target,
-   interval }`. `flowqueue.flows` is the configured number of flows, which
-   is not the `flows` statistic below
-
-and these statistics:
-
- - `queue_length`, `queue_limit` as the scheduler holds them
- - `transmit_packets`, `transmit_bytes`, `drop_packets`, `drop_bytes`
-
-A queue that fq-codel served also holds `flows`, the number of flows in use
-right now, plus the codel delay parameters in use, `codel_target` and
-`codel_interval`, and `delay_sum` and `delay_sum_squared`, the microsecond
-sums pfctl averages to print queue delay.
-@function pf:queues
-@treturn table array of queue tables
-@raise if the ioctl fails
-*/
 /*
  * A queue entry is a lua table rather than userdata, which is no barrier
  * to a metamethod. This renders what pfctl prints for one queue.
@@ -303,6 +263,24 @@ queue_tostring(lua_State *L)
 	return 1;
 }
 
+/***
+Read every queue, its configuration and its statistics.
+
+Configuration: name, parent, ifname, qid, parent_qid, qlimit, flags, and
+scheduler ("hfsc" or "fqcodel"). flowqueue_class says the ruleset used
+the flows keyword; only a flow queue with no parent runs fq-codel.
+default_queue and root_class are the two bits of flags. linkshare
+(bandwidth), realtime (min) and upperlimit (max) are service curves
+{ m1 = { absolute, percent }, m2 = { absolute, percent }, d }, where
+percent is always zero. flowqueue is { flows, quantum, target, interval }.
+
+Statistics: queue_length, queue_limit, transmit_packets, transmit_bytes,
+drop_packets, drop_bytes. An fq-codel queue also has flows (in use now),
+codel_target, codel_interval, delay_sum and delay_sum_squared.
+@function pf:queues
+@treturn table array of queue tables
+@raise if the ioctl fails
+*/
 int
 pfqueues(lua_State *L)
 {
@@ -380,11 +358,9 @@ pfqueues(lua_State *L)
 		pushfqspec(L, &pqs.queue.flowqueue);
 
 		/*
-		 * The kernel picks the arm of the statistics union with three
-		 * conditions, and all three have to hold before the fq-codel
-		 * fields mean anything. A flow queue with a parent is served
-		 * by HFSC, so reading flows out of it would really read
-		 * hfsc_class_stats.period.
+		 * The kernel fills the fq-codel arm of the union only when
+		 * all three hold. A flow queue with a parent runs HFSC, and
+		 * its flows field would be hfsc_class_stats.period.
 		 */
 		fqcodel = (pqs.queue.flags & PFQS_FLOWQUEUE) &&
 		          pqs.queue.parent_qid == 0 &&

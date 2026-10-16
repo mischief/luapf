@@ -140,12 +140,9 @@ entrytypename(uint8_t type)
 }
 
 /*
- * Pushes one lua table holding every field of a pfr_addr. negated is
- * pfra_not: without it a "!" entry is indistinguishable from an ordinary
- * one. fback is how the kernel answered a request about this entry, and
- * its nocount value means the entry has no counter block at all, which is
- * not the same as counters that read zero. Pushes nil for an address
- * family this binding cannot print.
+ * Push every field of a pfr_addr as a table, or nil for an unknown
+ * family. negated is pfra_not. fback nocount means the entry has no
+ * counters, which differs from counters that read zero.
  */
 static void
 pushentry(lua_State *L, const struct pfr_addr *pa)
@@ -251,11 +248,9 @@ tablepf(lua_State *L, const struct luapftable *lpft)
 }
 
 /*
- * Reads every address of a table into a lua userdata buffer, which is
- * left on the stack and returned, and reports how many there are. The
- * first ioctl only fills in the count. The request lives here rather than
- * in the caller: struct pfioc_table carries a whole anchor path, so two
- * of them in one frame overrun the frame size limit this build sets.
+ * Read every address of a table into a userdata left on the stack, and
+ * set the count. The first ioctl only gets the count. The request is here
+ * because two pfioc_table structs in one frame go over the frame limit.
  */
 static struct pfr_addr *
 readaddrs(lua_State *L, const struct luapf *pf, const struct pfr_table *t,
@@ -1561,17 +1556,12 @@ referenced, refdanchor, counters, addresses_count, match, nomatch,
 packets_in, packets_out, bytes_in, bytes_out, cleared, refcnt_rule and
 refcnt_anchor.
 
-The kernel counts packets and bytes per direction and per op, and
-packets_in, packets_out, bytes_in and bytes_out are sums over the four
-ops. The cells themselves are packets_in_block, packets_in_match,
-packets_in_pass, packets_in_xpass, packets_out_block, packets_out_match,
-packets_out_pass, packets_out_xpass and the eight bytes_ properties
-spelled the same way. An address keeps three ops rather than four, so a
-table sum and the sum of its addresses only agree while the xpass cells
-are zero.
+packets_in, packets_out, bytes_in and bytes_out sum the four ops. Each
+op has its own property too: packets_in_block, packets_in_match,
+packets_in_pass, packets_in_xpass, the same for packets_out, and the
+eight bytes_ forms. Addresses have no xpass op.
 
-All of them are a snapshot; refresh re-reads them. The length operator
-returns the address count, and tostring renders the table as a
-pfctl -s Tables line.
+The values are a snapshot; refresh re-reads them. #t is the address
+count, and tostring gives a pfctl -s Tables line.
 @table tableobject
 */

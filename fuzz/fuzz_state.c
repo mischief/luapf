@@ -1,10 +1,7 @@
 /* SPDX-License-Identifier: ISC */
 /*
- * Feed synthetic kernel bytes to the state rendering path.
- *
- * The state userdata is a struct pfsync_state copied straight out of
- * DIOCGETSTATES, so a fuzzer case is the wire struct itself: address
- * families, directions and ports all arrive unvalidated.
+ * Fuzz the state renderer. A case is a raw struct pfsync_state, so
+ * families, directions and ports arrive unchecked.
  */
 #include <string.h>
 
